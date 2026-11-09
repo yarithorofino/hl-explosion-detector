@@ -12,6 +12,13 @@ Direction-neutral. A name alerts on either:
              AND >= vol_1h_min_usd
   15m_early: |15m move| >= pct_15m_min, 15m notional >= vol_mult_min x the
              prior 24h average 15m bar AND >= vol_15m_min_usd
+  1h_legacy: |1h move| >= legacy_pct_1h AND the same 1h volume rule as above
+  3h_escalera: |close-to-open move| across escalera_candles 1h bars >= escalera_pct,
+             with at least escalera_min_aligned bars closing in that direction
+             and printing higher highs (or lower lows). No volume multiple.
+             Liquidity gates still apply. Label is "escalera".
+
+An alert fires if any of those holds. The payload lists every trigger that fired.
 
 Majors: names in major_coins, plus any main-dex perp whose 24h notional
 is >= major_day_ntl_usd. HIP-3 names do not become majors from volume alone.
@@ -52,15 +59,18 @@ _CFG_KEYS = (
     "major_day_ntl_usd", "vol_mult_min", "vol_1h_min_usd", "vol_15m_min_usd",
     "pct_15m_min", "avg_window_hours", "avg_window_15m",
     "liquidity_min_day_ntl_usd", "hip3_min_oi_usd", "tradable_min_day_ntl_usd",
-    "exhaustion_wick_pct", "prefilter_pct_15m", "prefilter_pct_1h", "prefilter_pct_24h",
+    "exhaustion_wick_pct", "legacy_pct_1h", "escalera_pct", "escalera_candles",
+    "escalera_min_aligned", "escalera_ignore_quiet_hours",
+    "prefilter_pct_15m", "prefilter_pct_1h", "prefilter_pct_24h", "prefilter_pct_3h",
     "prefilter_15m_min_age_sec", "prefilter_15m_max_age_sec", "prefilter_15m_target_sec",
     "prefilter_1h_min_age_sec", "prefilter_1h_max_age_sec", "prefilter_1h_target_sec",
+    "prefilter_3h_min_age_sec", "prefilter_3h_max_age_sec", "prefilter_3h_target_sec",
     "max_candle_calls", "cooldown_hours", "max_alerts_per_day", "max_alerts_per_hour",
     "quiet_start_hour", "quiet_end_hour", "scan_keep_days",
 )
 _SCAN_HEADERS = (
-    "dex", "coin", "15m %", "1h %", "24h %", "mult 1h", "vol 24h", "OI",
-    "funding %", "ATR %", "suelo", "resultado",
+    "dex", "coin", "15m %", "1h %", "3h %", "24h %", "mult 1h", "vol 24h", "OI",
+    "funding %", "ATR %", "suelo", "disparo", "resultado",
 )
 
 
@@ -148,7 +158,7 @@ def load_cfg():
 
 def load_state():
     if not STATE.exists() or STATE.stat().st_size == 0:
-        return {"marks": [], "last_fire": {}, "wakes": {}, "wakes_hour": {}}
+        return {"marks": [], "last_fire": {}, "last_fire_escalera": {}, "wakes": {}, "wakes_hour": {}}
     try:
         st = json.loads(STATE.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
@@ -187,7 +197,17 @@ def load_state():
     for k, v in (st.get("wakes_hour") or {}).items():
         if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
             wakes_hour[str(k)] = v
-    return {"marks": marks, "last_fire": last_fire, "wakes": wakes, "wakes_hour": wakes_hour}
+    last_fire_escalera = {}
+    for k, v in (st.get("last_fire_escalera") or {}).items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        if v != v or v in (float("inf"), float("-inf")):
+            continue
+        last_fire_escalera[str(k)] = float(v)
+    return {
+        "marks": marks, "last_fire": last_fire, "last_fire_escalera": last_fire_escalera,
+        "wakes": wakes, "wakes_hour": wakes_hour,
+    }
 
 
 def log_webhook_mode():
@@ -317,17 +337,23 @@ def _bar_stats(cs, i, interval, cfg):
         except (TypeError, ValueError, KeyError):
             atr = None
     min_i = int(cfg["atr_period"]) if interval == "1h" else 6
+    vol_enough = len(prior) >= 6
     return {
         "i": i, "pct": pct, "vol": vol, "vol_mult": mult, "atr_pct": atr,
-        "wick_ratio": wick, "enough": i >= min_i and len(prior) >= 6,
+        "wick_ratio": wick, "enough": i >= min_i and vol_enough, "vol_enough": vol_enough,
         "bar_open_madrid": datetime.fromtimestamp(cs[i]["t"] / 1000, MADRID).strftime("%Y-%m-%d %H:%M"),
     }
 
 
+def _volume_multiple_ok(stats, cfg):
+    return stats["vol_mult"] is not None and stats["vol_mult"] >= cfg["vol_mult_min"]
+
+
 def _is_hit(stats, interval, cfg, floor):
+    """1h path is the ATR rule. 15m path is the early rule. Legacy is separate."""
     if not stats or not stats["enough"]:
         return False
-    mult_ok = stats["vol_mult"] is not None and stats["vol_mult"] >= cfg["vol_mult_min"]
+    mult_ok = _volume_multiple_ok(stats, cfg)
     if interval == "1h":
         if stats["atr_pct"] is None:
             return False
@@ -335,6 +361,82 @@ def _is_hit(stats, interval, cfg, floor):
         return move_ok and mult_ok and stats["vol"] >= cfg["vol_1h_min_usd"]
     move_ok = abs(stats["pct"]) >= cfg["pct_15m_min"]
     return move_ok and mult_ok and stats["vol"] >= cfg["vol_15m_min_usd"]
+
+
+def _legacy_hit(stats, cfg):
+    """Fixed 1h rule: |move| >= legacy_pct_1h and the same notional gates."""
+    if not stats or not stats.get("vol_enough"):
+        return False
+    return (
+        abs(stats["pct"]) >= cfg["legacy_pct_1h"]
+        and _volume_multiple_ok(stats, cfg)
+        and stats["vol"] >= cfg["vol_1h_min_usd"]
+    )
+
+
+def escalera_at(cs, i, cfg):
+    """Staircase over `escalera_candles` 1h bars ending at i, including that bar.
+
+    Cumulative move is last close / first open. An up move needs at least
+    escalera_min_aligned green closes and that many higher highs; a down move
+    mirrors it with red closes and lower lows.
+    """
+    n = int(cfg["escalera_candles"])
+    if i < n - 1 or i >= len(cs):
+        return None
+    window = cs[i - n + 1:i + 1]
+    try:
+        first_o = float(window[0]["o"])
+        last_c = float(window[-1]["c"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if not first_o:
+        return None
+    pct = (last_c / first_o - 1) * 100
+    up = pct >= 0
+    aligned = 0
+    extremes = 0
+    for k, bar in enumerate(window):
+        try:
+            o, c = float(bar["o"]), float(bar["c"])
+            h, l = float(bar["h"]), float(bar["l"])
+        except (TypeError, ValueError, KeyError):
+            return None
+        if (c > o) if up else (c < o):
+            aligned += 1
+        prev = window[k - 1] if k else (cs[i - n] if i - n >= 0 else None)
+        if prev is None:
+            continue
+        try:
+            if up and h > float(prev["h"]):
+                extremes += 1
+            elif not up and l < float(prev["l"]):
+                extremes += 1
+        except (TypeError, ValueError, KeyError):
+            return None
+    need = int(cfg["escalera_min_aligned"])
+    return {
+        "hit": abs(pct) >= cfg["escalera_pct"] and aligned >= need and extremes >= need,
+        "pct": pct,
+        "close": last_c,
+        "aligned": aligned,
+        "extremes": extremes,
+    }
+
+
+def _annotate_bar(cs, s, interval, cfg, floor):
+    if interval == "1h":
+        esc = escalera_at(cs, s["i"], cfg)
+        s["atr_hit"] = _is_hit(s, "1h", cfg, floor)
+        s["legacy_hit"] = _legacy_hit(s, cfg)
+        s["escalera_hit"] = bool(esc and esc["hit"])
+        s["pct_3h"] = None if esc is None else esc["pct"]
+        s["hit"] = s["atr_hit"] or s["legacy_hit"] or s["escalera_hit"]
+    else:
+        s["atr_hit"] = s["legacy_hit"] = s["escalera_hit"] = False
+        s["pct_3h"] = None
+        s["hit"] = _is_hit(s, "15m", cfg, floor)
+    return s
 
 
 def series_view(cs, interval, cfg, floor):
@@ -346,23 +448,44 @@ def series_view(cs, interval, cfg, floor):
         s = _bar_stats(cs, i, interval, cfg)
         if not s:
             continue
-        s["hit"] = _is_hit(s, interval, cfg, floor)
-        stats.append(s)
+        stats.append(_annotate_bar(cs, s, interval, cfg, floor))
     if not stats:
         return None
     display = max(stats, key=lambda s: abs(s["pct"]))
     hits = [s for s in stats if s["hit"]]
     chosen = max(hits, key=lambda s: abs(s["pct"])) if hits else None
+    esc_hits = [s for s in stats if s["escalera_hit"] and s.get("pct_3h") is not None]
+    if esc_hits:
+        pct_3h = max(esc_hits, key=lambda s: abs(s["pct_3h"]))["pct_3h"]
+    else:
+        pct_3h = stats[-1].get("pct_3h")
     return {
         "pct": display["pct"],
         "vol": display["vol"],
         "vol_mult": display["vol_mult"],
         "atr_pct": display["atr_pct"] if interval == "1h" else None,
+        "pct_3h": pct_3h,
         "wick_ratio": (chosen or display)["wick_ratio"],
         "hit": bool(chosen),
+        "atr_hit": any(s["atr_hit"] for s in stats),
+        "legacy_hit": any(s["legacy_hit"] for s in stats),
+        "escalera_hit": any(s["escalera_hit"] for s in stats),
         "chosen": chosen,
         "bar_open_madrid": (chosen or display)["bar_open_madrid"],
     }
+
+
+def trigger_names(view_1h, view_15m):
+    names = []
+    if view_1h and view_1h.get("atr_hit"):
+        names.append("1h_atr")
+    if view_1h and view_1h.get("legacy_hit"):
+        names.append("1h_legacy")
+    if view_15m and view_15m.get("hit"):
+        names.append("15m_early")
+    if view_1h and view_1h.get("escalera_hit"):
+        names.append("3h_escalera")
+    return names
 
 
 def _pick_mark(marks, now, target, min_age, max_age):
@@ -468,8 +591,8 @@ def write_scans(when, day, markdown, rows, keep_days):
     previous = []
     if path.exists():
         previous = path.read_text(encoding="utf-8").splitlines()
-    header = ["ts_madrid", "dex", "coin", "pct_15m", "pct_1h", "pct_24h", "vol_mult_1h",
-              "day_ntl", "oi_usd", "funding_pct", "atr_pct", "floor_pct", "result"]
+    header = ["ts_madrid", "dex", "coin", "pct_15m", "pct_1h", "pct_3h", "pct_24h", "vol_mult_1h",
+              "day_ntl", "oi_usd", "funding_pct", "atr_pct", "floor_pct", "triggers", "result"]
     # Rewrite the file so a crash cannot leave a half line, and so the header exists once.
     body = []
     if previous:
@@ -479,9 +602,10 @@ def write_scans(when, day, markdown, rows, keep_days):
     for row in rows:
         buf_rows.append([
             when, row["dex"], row["coin"], _csv_cell(row["_pct_15m"]), _csv_cell(row["_pct_1h"]),
-            _csv_cell(row["_pct_24h"]), _csv_cell(row["_vol_mult"]), _csv_cell(row["_day"]),
-            _csv_cell(row["_oi"]), _csv_cell(row["_funding"]), _csv_cell(row["_atr"]),
-            _csv_cell(row["_floor"]), row["resultado"],
+            _csv_cell(row["_pct_3h"]), _csv_cell(row["_pct_24h"]), _csv_cell(row["_vol_mult"]),
+            _csv_cell(row["_day"]), _csv_cell(row["_oi"]), _csv_cell(row["_funding"]),
+            _csv_cell(row["_atr"]), _csv_cell(row["_floor"]), row.get("_triggers") or "",
+            row["resultado"],
         ])
     import io
     sio = io.StringIO()
@@ -506,16 +630,19 @@ def write_scans(when, day, markdown, rows, keep_days):
 def _row_from(asset, floor, view_1h, view_15m, result):
     pct_15 = view_15m["pct"] if view_15m else None
     pct_1h = view_1h["pct"] if view_1h else None
-    atr = None
-    vol_mult = None
+    pct_3h = view_1h.get("pct_3h") if view_1h else None
+    atr = vol_mult = None
     if view_1h:
         atr = view_1h.get("atr_pct")
         vol_mult = view_1h.get("vol_mult")
+    names = trigger_names(view_1h, view_15m)
+    disparo = "+".join(names) if names else "—"
     return {
         "dex": asset.get("dex") or "",
         "coin": asset.get("coin") or "",
         "15m %": _fmt(pct_15),
         "1h %": _fmt(pct_1h),
+        "3h %": _fmt(pct_3h),
         "24h %": _fmt(asset.get("pct_24h")),
         "mult 1h": _fmt(vol_mult, 1),
         "vol 24h": _fmt(asset.get("dayNtlVlm"), 0),
@@ -523,9 +650,11 @@ def _row_from(asset, floor, view_1h, view_15m, result):
         "funding %": _fmt(_funding_pct(asset), 5),
         "ATR %": _fmt(atr, 2),
         "suelo": _fmt(floor, 1),
+        "disparo": disparo,
         "resultado": result,
         "_pct_15m": None if pct_15 is None else round(pct_15, 4),
         "_pct_1h": None if pct_1h is None else round(pct_1h, 4),
+        "_pct_3h": None if pct_3h is None else round(pct_3h, 4),
         "_pct_24h": asset.get("pct_24h"),
         "_vol_mult": None if vol_mult is None else round(vol_mult, 4),
         "_day": asset.get("dayNtlVlm"),
@@ -533,6 +662,7 @@ def _row_from(asset, floor, view_1h, view_15m, result):
         "_funding": _funding_pct(asset),
         "_atr": None if atr is None else round(atr, 4),
         "_floor": floor,
+        "_triggers": "+".join(names),
     }
 
 
@@ -544,11 +674,7 @@ def _finite_round(v, nd):
 
 
 def build_alert(asset, floor, view_1h, view_15m, oi_change, nowm):
-    fired = []
-    if view_1h and view_1h["hit"]:
-        fired.append("1h_atr")
-    if view_15m and view_15m["hit"]:
-        fired.append("15m_early")
+    fired = trigger_names(view_1h, view_15m)
     trigger = "+".join(fired)
     wicks = []
     for view in (view_1h, view_15m):
@@ -587,8 +713,9 @@ def build_alert(asset, floor, view_1h, view_15m, oi_change, nowm):
         "exhaustion_flag": bool(exhaustion),
         "exhaustion_label": "posible agotamiento" if exhaustion else None,
         "early_floor_pct": asset.get("_early_floor") if "15m_early" in fired else None,
+        "pct_3h": _finite_round((view_1h or {}).get("pct_3h"), 2),
         "tradable": bool(tradable),
-        "label": "operable" if tradable else "vigilancia, no operable",
+        "label": "escalera" if "3h_escalera" in fired else ("operable" if tradable else "vigilancia, no operable"),
         "maxLeverage": asset.get("maxLeverage"),
         "detected_at_madrid": nowm.strftime("%Y-%m-%d %H:%M"),
     }
@@ -603,6 +730,53 @@ def append_jsonl(path, record, limit=ALERT_KEEP):
     if len(lines) > limit:
         lines = lines[-limit:]
     atomic_write(path, "\n".join(lines) + "\n")
+
+
+def replay_candles(cs_1h, cs_15m, cfg, floor):
+    """Every bar where a trigger is true. Cooldown is not applied.
+
+    Returned times are the candle open in Europe/Madrid. `close` is that bar's close.
+    """
+    events = []
+    for i, candle in enumerate(cs_1h or []):
+        stats = _bar_stats(cs_1h, i, "1h", cfg)
+        if not stats:
+            continue
+        esc = escalera_at(cs_1h, i, cfg)
+        names = []
+        if _is_hit(stats, "1h", cfg, floor):
+            names.append("1h_atr")
+        if _legacy_hit(stats, cfg):
+            names.append("1h_legacy")
+        if esc and esc["hit"]:
+            names.append("3h_escalera")
+        if not names:
+            continue
+        events.append({
+            "interval": "1h",
+            "madrid": stats["bar_open_madrid"],
+            "open": float(candle["o"]),
+            "close": float(candle["c"]),
+            "pct": round(stats["pct"], 2),
+            "vol_mult": None if stats["vol_mult"] is None else round(stats["vol_mult"], 2),
+            "atr_pct": None if stats["atr_pct"] is None else round(stats["atr_pct"], 2),
+            "pct_3h": None if esc is None else round(esc["pct"], 2),
+            "triggers": names,
+        })
+    for i, candle in enumerate(cs_15m or []):
+        stats = _bar_stats(cs_15m, i, "15m", cfg)
+        if not stats or not _is_hit(stats, "15m", cfg, floor):
+            continue
+        events.append({
+            "interval": "15m",
+            "madrid": stats["bar_open_madrid"],
+            "open": float(candle["o"]),
+            "close": float(candle["c"]),
+            "pct": round(stats["pct"], 2),
+            "vol_mult": None if stats["vol_mult"] is None else round(stats["vol_mult"], 2),
+            "triggers": ["15m_early"],
+        })
+    return events
 
 
 def backtest(hours=48):
@@ -670,20 +844,26 @@ def run_cycle(cfg):
         st["marks"], now, cfg["prefilter_15m_target_sec"],
         cfg["prefilter_15m_min_age_sec"], cfg["prefilter_15m_max_age_sec"],
     )
+    old3 = _pick_mark(
+        st["marks"], now, cfg["prefilter_3h_target_sec"],
+        cfg["prefilter_3h_min_age_sec"], cfg["prefilter_3h_max_age_sec"],
+    )
     ranked = []
     for a in assets:
         if not passes_liquidity(a, cfg):
             continue
         p1 = _pct_between(a["mark"], (old or {}).get("m", {}).get(a["coin"]))
         p15 = _pct_between(a["mark"], (prev or {}).get("m", {}).get(a["coin"]))
+        p3 = _pct_between(a["mark"], (old3 or {}).get("m", {}).get(a["coin"]))
         hot = (
             (p15 is not None and abs(p15) >= cfg["prefilter_pct_15m"])
             or (p1 is not None and abs(p1) >= cfg["prefilter_pct_1h"])
+            or (p3 is not None and abs(p3) >= cfg["prefilter_pct_3h"])
             or abs(a.get("pct_24h") or 0) >= cfg["prefilter_pct_24h"]
         )
         if not hot:
             continue
-        score = max(abs(p15 or 0), abs(p1 or 0), abs(a.get("pct_24h") or 0))
+        score = max(abs(p15 or 0), abs(p1 or 0), abs(p3 or 0), abs(a.get("pct_24h") or 0))
         ranked.append((score, a))
     fresh_m, fresh_oi = {}, {}
     for a in assets:
@@ -715,12 +895,16 @@ def run_cycle(cfg):
             n_series += 1
         except Exception as e:
             log(f"velas 15m {a['coin']}: {e}")
-        hit = bool((view_1h and view_1h["hit"]) or (view_15 and view_15["hit"]))
+        names = trigger_names(view_1h, view_15)
+        explosive = [n for n in names if n != "3h_escalera"]
+        cool = cfg["cooldown_hours"] * H
+        explosive_ready = bool(explosive) and now - st["last_fire"].get(a["coin"], 0) >= cool
+        escalera_ready = "3h_escalera" in names and now - st["last_fire_escalera"].get(a["coin"], 0) >= cool
         if view_1h is None and view_15 is None:
             result = "sin velas"
-        elif not hit:
+        elif not names:
             result = "no llega"
-        elif now - st["last_fire"].get(a["coin"], 0) < cfg["cooldown_hours"] * H:
+        elif not explosive_ready and not escalera_ready:
             result = "pausa"
             log(f"en pausa {a['coin']}")
         else:
@@ -742,45 +926,69 @@ def run_cycle(cfg):
     quiet = cfg["quiet_start_hour"] <= nowm.hour < cfg["quiet_end_hour"]
     day_n = st["wakes"].get(today, 0)
     hour_n = st["wakes_hour"].get(hour_key, 0)
+    def _quiet_blocks(alert):
+        if not quiet:
+            return False
+        names = set((alert.get("trigger") or "").split("+")) - {""}
+        if names == {"3h_escalera"} and cfg.get("escalera_ignore_quiet_hours"):
+            return False
+        return True
+
     status = "none"
     sent_n = 0
     counted = 0
-    if pending:
+    sendable = [p for p in pending if not _quiet_blocks(p)]
+    silenced = [p for p in pending if _quiet_blocks(p)]
+    if silenced:
+        silenced_coins = {p["coin"] for p in silenced}
+        for row in rows:
+            if row["coin"] in silenced_coins and row["resultado"] == "alerta":
+                row["resultado"] = "silencio"
+    logged = []
+    if pending and not sendable:
+        status = "quiet_hours_logged"
+        logged = pending
+    elif sendable:
         capped = day_n >= cfg["max_alerts_per_day"] or hour_n >= cfg["max_alerts_per_hour"]
-        if quiet:
-            status = "quiet_hours_logged"
-            for row in rows:
-                if row["resultado"] == "alerta":
-                    row["resultado"] = "silencio"
-        elif capped:
+        if capped:
             status = "hourly_cap_logged" if hour_n >= cfg["max_alerts_per_hour"] else "daily_cap_logged"
             for row in rows:
                 if row["resultado"] == "alerta":
                     row["resultado"] = "tope"
         else:
-            status = send(pending, cfg)
+            status = send(sendable, cfg)
             if status in ("posted", "dry_run"):
                 st["wakes"][today] = day_n + 1
                 st["wakes_hour"][hour_key] = hour_n + 1
-                for p in pending:
-                    st["last_fire"][p["coin"]] = now
-                sent_n = len(pending) if status == "posted" else 0
-                counted = len(pending)
+                for p in sendable:
+                    kinds = set((p.get("trigger") or "").split("+"))
+                    if kinds - {"3h_escalera"}:
+                        st["last_fire"][p["coin"]] = now
+                    if "3h_escalera" in kinds:
+                        st["last_fire_escalera"][p["coin"]] = now
+                sent_n = len(sendable) if status == "posted" else 0
+                counted = len(sendable)
             else:
                 counted = 0
+        logged = sendable
+    if logged:
         append_jsonl(ALERTS, {
-            "at": nowm.isoformat(timespec="seconds"), "status": status, "alerts": pending,
+            "at": nowm.isoformat(timespec="seconds"), "status": status, "alerts": logged,
         })
-        for p in pending:
+        for p in logged:
             log(
                 f"alerta {p['coin']} dex={p['dex']} trigger={p['trigger']} "
-                f"pct_1h={p['pct_1h']} pct_15m={p['pct_15m']} floor={p['floor_pct']} "
-                f"atr={p['atr_pct']} tradable={p['tradable']} exhaustion={p['exhaustion_flag']}"
+                f"pct_1h={p['pct_1h']} pct_15m={p['pct_15m']} pct_3h={p.get('pct_3h')} "
+                f"floor={p['floor_pct']} atr={p['atr_pct']} tradable={p['tradable']} "
+                f"label={p['label']} exhaustion={p['exhaustion_flag']}"
             )
     st["wakes"] = {k: v for k, v in st["wakes"].items() if k >= today}
     st["wakes_hour"] = {k: v for k, v in st["wakes_hour"].items() if k == hour_key}
     cooldown_s = cfg["cooldown_hours"] * H
     st["last_fire"] = {k: v for k, v in st["last_fire"].items() if now - v < cooldown_s}
+    st["last_fire_escalera"] = {
+        k: v for k, v in st["last_fire_escalera"].items() if now - v < cooldown_s
+    }
     atomic_write(STATE, json.dumps(st, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
 
     when = nowm.strftime("%Y-%m-%d %H:%M")
