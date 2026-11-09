@@ -59,6 +59,32 @@ path = pathlib.Path("data/detector_state.json")
 path.write_bytes(raw)
 print(f"Estado restaurado: marcas={len(d['marks'])} cooldowns={len(d.get('last_fire') or {})} dias={len(d.get('wakes') or {})}")
 
+listing = subprocess.run(
+    ["git", "ls-tree", "-r", "--name-only", "origin/detector-state"],
+    capture_output=True, text=True,
+)
+if listing.returncode != 0:
+    print("No se pudo listar detector-state. Se aborta; el remoto no se toca.", file=sys.stderr)
+    sys.exit(1)
+n_scans = 0
+for rel in listing.stdout.splitlines():
+    name = rel.rsplit("/", 1)[-1]
+    ok_scan = rel == "data/scans/latest.md" or (
+        rel.startswith("data/scans/") and len(name) == 14 and name.endswith(".csv") and name[4] == "-" and name[7] == "-"
+    )
+    if not ok_scan:
+        continue
+    blob = show(rel)
+    if blob is None:
+        continue
+    dest = pathlib.Path(rel)
+    if ".." in dest.parts:
+        continue
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(blob)
+    n_scans += 1
+print(f"Scans restaurados: {n_scans}")
+
 alerts = show("signals/explosion_alerts.jsonl")
 if alerts:
     lines = [ln for ln in alerts.decode("utf-8", "replace").splitlines() if ln.strip()]

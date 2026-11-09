@@ -58,6 +58,11 @@ abort_if_secret(state_text, "el estado")
 alerts = Path("signals/explosion_alerts.jsonl")
 if alerts.exists():
     abort_if_secret(alerts.read_text(encoding="utf-8", errors="replace"), "el historial de alertas")
+scans = Path("data/scans")
+if scans.exists():
+    for child in scans.iterdir():
+        if child.is_file():
+            abort_if_secret(child.read_text(encoding="utf-8", errors="replace"), f"el scan {child.name}")
 print(f"estado valido: marcas={len(d['marks'])} cooldowns={len(d['last_fire'])} dias_wake={len(d['wakes'])}")
 PY
 
@@ -92,14 +97,36 @@ if [[ -s signals/explosion_alerts.jsonl ]]; then
   add_blob "signals/explosion_alerts.jsonl" "signals/explosion_alerts.jsonl"
 fi
 
+if [[ -d data/scans ]]; then
+  while IFS= read -r f; do
+    base=$(basename "$f")
+    case "$base" in
+      latest.md)
+        add_blob "data/scans/latest.md" "$f"
+        ;;
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv)
+        add_blob "data/scans/$base" "$f"
+        ;;
+      *)
+        echo "Fichero de scan no permitido: $f" >&2
+        exit 1
+        ;;
+    esac
+  done < <(find data/scans -type f | sort)
+fi
+
 cat > "$LEEME" <<'EOF'
 Esta rama la reescribe sola GitHub Actions (workflow "Detector de explosiones").
 No edites estos ficheros: el siguiente ciclo los sustituye.
 
 - data/detector_state.json
-  Memoria del detector: precios de hace unas horas, pausa por activo y contador de avisos del día.
+  Memoria del detector: precios e interés abierto de hace unas horas, pausa por activo y contadores de avisos (día y hora).
 - signals/explosion_alerts.jsonl
   Historial corto de avisos (una línea JSON por tanda). Si aún no ha habido avisos, este fichero no está.
+- data/scans/latest.md
+  Tabla del último ciclo, la misma que el resumen de Actions.
+- data/scans/AAAA-MM-DD.csv
+  Un candidato por fila. Solo se conservan los últimos 14 días.
 
 No hay secretos aquí. La URL del webhook no se guarda en el repositorio.
 EOF
@@ -107,7 +134,8 @@ add_blob "LEEME.txt" "$LEEME"
 
 while IFS= read -r f; do
   case "$f" in
-    LEEME.txt|data/detector_state.json|signals/explosion_alerts.jsonl) ;;
+    LEEME.txt|data/detector_state.json|signals/explosion_alerts.jsonl|data/scans/latest.md) ;;
+    data/scans/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
     *)
       echo "Ruta inesperada en el estado: $f" >&2
       exit 1

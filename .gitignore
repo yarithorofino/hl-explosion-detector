@@ -7,5 +7,6 @@ data/detector_backtest.json
 data/*.tmp
 data/state_ready
 data/run_summary.txt
+data/scans/
 signals/*.tmp
 signals/explosion_alerts.jsonl

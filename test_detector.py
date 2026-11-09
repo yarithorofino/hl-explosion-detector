@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests. They must not call Hyperliquid or any webhook."""
 import contextlib
+import csv
 import io
 import json
 import os
@@ -33,50 +34,54 @@ def load_cfg(**over):
     return cfg
 
 
-def asset(coin, mark=100.0, pct_24h=1.0, day=1_000_000.0, dex="main"):
+def asset(coin, mark=100.0, pct_24h=20.0, day=2_000_000.0, dex="main", oi=1_000_000.0,
+          funding=0.0000125, premium=-0.0003642):
     return {
-        "dex": dex,
-        "coin": coin,
-        "mark": mark,
-        "prevDayPx": mark,
-        "pct_24h": pct_24h,
-        "dayNtlVlm": day,
-        "oi_coins": 1.0,
-        "oi_usd": None if mark is None else mark,
-        "funding": 0.0,
+        "dex": dex, "coin": coin, "mark": mark, "prevDayPx": mark, "oracle": mark,
+        "pct_24h": pct_24h, "dayNtlVlm": day, "oi_coins": 1.0,
+        "oi_usd": None if oi is None else oi,
+        "funding": funding,
+        "funding_pct": None if funding is None else round(funding * 100, 6),
+        "premium": premium,
+        "premium_pct": None if premium is None else round(premium * 100, 4),
         "maxLeverage": 10,
     }
 
 
 def snap(assets, errors=None):
-    return {
-        "assets": assets,
-        "errors": errors or [],
-        "count": len(assets),
-        "dexs": ["main"],
-        "ts": NOW,
-    }
+    return {"assets": assets, "errors": errors or [], "count": len(assets), "dexs": ["main"], "ts": NOW}
 
 
-def make_candles(n=30, last_pct=10.0, last_v=800.0, base_v=10.0, price=100.0):
+def bars(n, last_pct, last_v, base_v=10.0, price=100.0, step_ms=3_600_000, high_extra=0.0, low_extra=0.0):
     cs = []
-    t0 = NOW * 1000 - (n - 1) * 3_600_000
+    t0 = NOW * 1000 - (n - 1) * step_ms
     for i in range(n):
-        o = price
-        c = price
+        o = c = price
+        h = l = price
         v = base_v
         if i == n - 1:
             c = price * (1 + last_pct / 100.0)
+            h = max(o, c) + high_extra
+            l = min(o, c) - low_extra
             v = last_v
-        cs.append({
-            "t": t0 + i * 3_600_000,
-            "o": o,
-            "h": max(o, c),
-            "l": min(o, c),
-            "c": c,
-            "v": v,
-        })
+        cs.append({"t": t0 + i * step_ms, "o": o, "h": h, "l": l, "c": c, "v": v})
     return cs
+
+
+def hit_1h():
+    return bars(40, last_pct=10.0, last_v=2000.0)
+
+
+def quiet_15m():
+    return bars(40, last_pct=0.2, last_v=10.0, step_ms=900_000)
+
+
+def route(hour=None, quarter=None):
+    def candles(coin, interval, n_bars):
+        if interval == "15m":
+            return quiet_15m() if quarter is None else quarter
+        return hit_1h() if hour is None else hour
+    return candles
 
 
 class Resp(io.BytesIO):
@@ -180,7 +185,7 @@ class DetectorTests(unittest.TestCase):
 
     def cycle(self, assets, candle_fn=None, cfg=None, state=None):
         detector.scan = lambda: snap(assets)
-        detector.candles = candle_fn or (lambda coin, hours: make_candles())
+        detector.candles = candle_fn or route()
         if state is not None:
             detector.STATE.write_text(json.dumps(state), encoding="utf-8")
         return detector.run_cycle(cfg or load_cfg())
@@ -193,54 +198,143 @@ class DetectorTests(unittest.TestCase):
             return []
         return [json.loads(ln) for ln in detector.ALERTS.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
+    def latest(self):
+        return (detector.STATE.parent / "scans" / "latest.md").read_text(encoding="utf-8")
+
     def test_config_thresholds(self):
         cfg = load_cfg()
-        self.assertEqual(cfg["pct_1h_min"], 8.0)
+        self.assertEqual(cfg["atr_period"], 14)
+        self.assertEqual(cfg["atr_mult"], 3.0)
+        self.assertEqual(cfg["floor_pct_major"], 3.0)
+        self.assertEqual(cfg["floor_pct_other"], 5.0)
+        self.assertEqual(cfg["major_coins"], ["BTC", "ETH", "SOL"])
+        self.assertEqual(cfg["major_day_ntl_usd"], 100_000_000)
         self.assertEqual(cfg["vol_mult_min"], 5.0)
-        self.assertEqual(cfg["vol_1h_min_usd"], 50000)
-        self.assertEqual(cfg["avg_window_hours"], 24)
+        self.assertEqual(cfg["vol_1h_min_usd"], 100_000)
+        self.assertEqual(cfg["vol_15m_min_usd"], 25_000)
+        self.assertEqual(cfg["pct_15m_min"], 4.0)
+        self.assertEqual(cfg["liquidity_min_day_ntl_usd"], 300_000)
+        self.assertEqual(cfg["hip3_min_oi_usd"], 500_000)
+        self.assertEqual(cfg["tradable_min_day_ntl_usd"], 1_000_000)
+        self.assertEqual(cfg["max_alerts_per_day"], 6)
+        self.assertEqual(cfg["max_alerts_per_hour"], 2)
         self.assertEqual(cfg["cooldown_hours"], 4)
-        self.assertEqual(cfg["max_wakes_per_day"], 8)
         self.assertEqual(cfg["quiet_start_hour"], 0)
         self.assertEqual(cfg["quiet_end_hour"], 8)
-        self.assertEqual(cfg["max_candle_calls"], 25)
-        self.assertEqual(cfg["prefilter_pct_1h"], 4.0)
-        self.assertEqual(cfg["prefilter_pct_24h"], 8.0)
+        self.assertEqual(cfg["prefilter_pct_15m"], 3.0)
+        self.assertEqual(cfg["scan_keep_days"], 14)
 
-    def test_eval_bar_and_logic(self):
+    def test_floor_matches_the_agreed_rule(self):
         cfg = load_cfg()
-        hit = make_candles()
-        m = detector.eval_bar(hit, len(hit) - 1, cfg)
-        self.assertIsNotNone(m)
-        self.assertTrue(m["hit"])
-        self.assertGreaterEqual(abs(m["pct_1h"]), 8)
-        self.assertGreaterEqual(m["vol_1h_usd"], 50000)
-        self.assertGreaterEqual(m["vol_mult"], 5)
-        self.assertIsNone(detector.eval_bar(hit, 5, cfg))
+        self.assertEqual(detector.floor_for(asset("BTC", day=1_000), cfg), 3.0)
+        self.assertEqual(detector.floor_for(asset("xyz:GOLD", dex="xyz", day=5_000_000_000, oi=2_000_000), cfg), 5.0)
+        self.assertEqual(detector.floor_for(asset("DOGE", dex="main", day=100_000_000), cfg), 3.0)
+        self.assertEqual(detector.floor_for(asset("DOGE", dex="main", day=99_000_000), cfg), 5.0)
+        self.assertFalse(detector.passes_liquidity(asset("TINY", day=299_000), cfg))
+        self.assertFalse(detector.passes_liquidity(asset("HIP", dex="xyz", day=2_000_000, oi=499_000), cfg))
+        self.assertTrue(detector.passes_liquidity(asset("HIP", dex="xyz", day=2_000_000, oi=500_000), cfg))
 
-        small_move = make_candles(last_pct=7.0, last_v=800.0)
-        self.assertFalse(detector.eval_bar(small_move, len(small_move) - 1, cfg)["hit"])
+    def test_atr_multiple_blocks_a_noisy_name(self):
+        cs = []
+        t0 = NOW * 1000 - 39 * 3_600_000
+        for i in range(40):
+            o = c = 100.0
+            h, l, v = 110.0, 90.0, 10.0
+            if i == 39:
+                c, h, l, v = 106.0, 106.0, 100.0, 2000.0
+            cs.append({"t": t0 + i * 3_600_000, "o": o, "h": h, "l": l, "c": c, "v": v})
+        view = detector.series_view(cs, "1h", load_cfg(), 5.0)
+        self.assertGreater(abs(view["pct"]), 5)
+        self.assertFalse(view["hit"])
 
-        thin = make_candles(last_pct=10.0, last_v=10.0)
-        self.assertFalse(detector.eval_bar(thin, len(thin) - 1, cfg)["hit"])
+    def test_wick_ratio_is_the_rejection_wick(self):
+        up = {"o": 100, "h": 130, "l": 100, "c": 110, "v": 1}
+        down = {"o": 100, "h": 100, "l": 70, "c": 90, "v": 1}
+        self.assertGreater(detector.wick_ratio_pct(up), 50)
+        self.assertGreater(detector.wick_ratio_pct(down), 50)
+        held = {"o": 100, "h": 110, "l": 99, "c": 110, "v": 1}
+        self.assertLess(detector.wick_ratio_pct(held), 50)
 
-        # Volume is large enough in dollars but only ~2.5x the prior hour.
-        loud_prior = make_candles(base_v=200.0, last_v=500.0, last_pct=10.0)
-        missed = detector.eval_bar(loud_prior, len(loud_prior) - 1, cfg)
-        self.assertGreaterEqual(missed["vol_1h_usd"], 50000)
-        self.assertLess(missed["vol_mult"], 5)
-        self.assertFalse(missed["hit"])
-
-    def test_dry_run_counts_wake_and_cooldown(self):
-        self.assertTrue(self.cycle([asset("AAA", pct_24h=20)]))
+    def test_dry_run_alert_carries_the_new_fields(self):
+        state = {"marks": [{"ts": NOW - 3600, "m": {"AAA": 100.0}, "oi": {"AAA": 100.0}}],
+                 "last_fire": {}, "wakes": {}}
+        self.assertTrue(self.cycle([asset("AAA", oi=150.0)], state=state))
+        item = self.alerts()[0]["alerts"][0]
+        self.assertEqual(item["trigger"], "1h_atr")
+        self.assertEqual(item["floor_pct"], 5.0)
+        self.assertGreaterEqual(abs(item["pct_1h"]), 5)
+        self.assertGreaterEqual(item["vol_1h_usd"], 100_000)
+        self.assertGreaterEqual(item["vol_mult"], 5)
+        self.assertEqual(item["dex"], "main")
+        self.assertEqual(item["funding_pct"], 0.00125)
+        self.assertEqual(item["premium_pct"], -0.0364)
+        self.assertEqual(item["oi_usd"], 150.0)
+        self.assertEqual(item["oi_change_1h_pct"], 50.0)
+        self.assertFalse(item["exhaustion_flag"])
+        self.assertIsNone(item["exhaustion_label"])
+        self.assertTrue(item["tradable"])
+        self.assertEqual(item["label"], "operable")
+        self.assertIn("ATR %", self.latest())
+        self.assertIn("alerta", self.latest())
         st = self.read_state()
         self.assertEqual(st["wakes"]["2026-06-15"], 1)
+        self.assertEqual(st["wakes_hour"]["2026-06-15T12"], 1)
         self.assertEqual(st["last_fire"]["AAA"], NOW)
-        self.assertEqual(self.alerts()[0]["status"], "dry_run")
-        self.assertEqual(self.alerts()[0]["alerts"][0]["coin"], "AAA")
-        text = detector.LOG.read_text(encoding="utf-8")
-        self.assertIn("status=dry_run", text)
-        self.assertIn("dry-run:", text)
+        self.assertIn("status=dry_run", detector.LOG.read_text(encoding="utf-8"))
+
+    def test_small_book_is_flagged_not_tradable(self):
+        self.assertTrue(self.cycle([asset("MEME", day=400_000)]))
+        item = self.alerts()[0]["alerts"][0]
+        self.assertFalse(item["tradable"])
+        self.assertEqual(item["label"], "vigilancia, no operable")
+
+    def test_major_floor_is_3_percent_and_the_rest_stay_at_5(self):
+        seen = []
+
+        def candles(coin, interval, n_bars):
+            seen.append((coin, interval))
+            if interval == "1h":
+                return bars(40, last_pct=4.0, last_v=2000.0)
+            return quiet_15m()
+
+        self.assertTrue(self.cycle([
+            asset("BTC", pct_24h=10),
+            asset("MEME", pct_24h=10),
+        ], candle_fn=candles))
+        by_coin = {a["coin"]: a for a in self.alerts()[0]["alerts"]}
+        self.assertIn("BTC", by_coin)
+        self.assertNotIn("MEME", by_coin)
+        self.assertEqual(by_coin["BTC"]["floor_pct"], 3.0)
+        self.assertEqual(by_coin["BTC"]["trigger"], "1h_atr")
+        text = self.latest()
+        self.assertIn("alerta", text)
+        self.assertIn("no llega", text)
+
+    def test_15m_early_trigger(self):
+        def candles(coin, interval, n_bars):
+            if interval == "15m":
+                return bars(40, last_pct=6.0, last_v=500.0, step_ms=900_000)
+            return bars(40, last_pct=0.4, last_v=10.0)
+
+        self.assertTrue(self.cycle([asset("AAA")], candle_fn=candles))
+        item = self.alerts()[0]["alerts"][0]
+        self.assertEqual(item["trigger"], "15m_early")
+        self.assertGreaterEqual(abs(item["pct_15m"]), 4)
+        self.assertGreaterEqual(item["vol_15m_usd"], 25_000)
+        self.assertEqual(item["early_floor_pct"], 4.0)
+        self.assertEqual(item["floor_pct"], 5.0)
+
+    def test_exhaustion_flag(self):
+        def candles(coin, interval, n_bars):
+            if interval == "1h":
+                return bars(40, last_pct=10.0, last_v=2000.0, high_extra=30.0)
+            return quiet_15m()
+
+        self.assertTrue(self.cycle([asset("AAA")], candle_fn=candles))
+        item = self.alerts()[0]["alerts"][0]
+        self.assertGreater(item["wick_ratio"], 50)
+        self.assertTrue(item["exhaustion_flag"])
+        self.assertEqual(item["exhaustion_label"], "posible agotamiento")
 
     def test_quiet_hours_do_not_send_or_count(self):
         self.freeze(3)
@@ -249,48 +343,59 @@ class DetectorTests(unittest.TestCase):
             raise AssertionError("no se debe llamar al webhook en silencio")
 
         detector.send = forbid_send
-        self.assertTrue(self.cycle([asset("AAA", pct_24h=20)]))
+        self.assertTrue(self.cycle([asset("AAA")]))
         st = self.read_state()
         self.assertEqual(st["wakes"], {})
+        self.assertEqual(st["wakes_hour"], {})
         self.assertEqual(st["last_fire"], {})
         self.assertEqual(self.alerts()[0]["status"], "quiet_hours_logged")
-        self.assertGreaterEqual(len(st["marks"]), 1)
+        self.assertIn("silencio", self.latest())
 
-    def test_daily_cap(self):
+    def test_quiet_hours_end_at_08(self):
+        self.freeze(8)
+        self.assertTrue(self.cycle([asset("AAA")]))
+        self.assertEqual(self.alerts()[0]["status"], "dry_run")
+        self.assertIn("alerta", self.latest())
+
+    def test_daily_and_hourly_caps(self):
         def forbid_send(*_a, **_k):
-            raise AssertionError("el tope diario no debe hacer POST")
+            raise AssertionError("el tope no debe hacer POST")
 
         detector.send = forbid_send
         self.assertTrue(self.cycle(
-            [asset("AAA", pct_24h=20)],
-            state={"marks": [], "last_fire": {}, "wakes": {"2026-06-15": 8}},
+            [asset("AAA")],
+            state={"marks": [], "last_fire": {}, "wakes": {"2026-06-15": 6}, "wakes_hour": {}},
         ))
-        st = self.read_state()
-        self.assertEqual(st["wakes"]["2026-06-15"], 8)
-        self.assertEqual(st["last_fire"], {})
         self.assertEqual(self.alerts()[0]["status"], "daily_cap_logged")
+        self.assertIn("tope", self.latest())
+        self.assertEqual(self.read_state()["wakes"]["2026-06-15"], 6)
+
+        self.assertTrue(self.cycle(
+            [asset("BBB", pct_24h=20)],
+            state={"marks": [], "last_fire": {}, "wakes": {}, "wakes_hour": {"2026-06-15T12": 2}},
+        ))
+        self.assertEqual(self.alerts()[-1]["status"], "hourly_cap_logged")
 
     def test_cooldown_suppresses_repeat(self):
         self.assertTrue(self.cycle(
-            [asset("AAA", pct_24h=20)],
+            [asset("AAA")],
             state={"marks": [], "last_fire": {"AAA": NOW - 60}, "wakes": {}},
         ))
         self.assertEqual(self.alerts(), [])
-        st = self.read_state()
-        self.assertEqual(st["last_fire"]["AAA"], NOW - 60)
-        self.assertEqual(st["wakes"], {})
+        self.assertIn("pausa", self.latest())
+        self.assertEqual(self.read_state()["last_fire"]["AAA"], NOW - 60)
         self.assertIn("status=none", detector.LOG.read_text(encoding="utf-8"))
 
-    def test_post_failed_does_not_consume_wake(self):
+    def test_post_failed_does_not_consume_a_slot(self):
         detector.send = lambda payload, cfg: "post_failed"
-        self.assertTrue(self.cycle([asset("AAA", pct_24h=20)]))
+        self.assertTrue(self.cycle([asset("AAA")]))
         st = self.read_state()
         self.assertEqual(st["wakes"], {})
+        self.assertEqual(st["wakes_hour"], {})
         self.assertEqual(st["last_fire"], {})
         self.assertEqual(self.alerts()[0]["status"], "post_failed")
-        self.assertTrue((detector.STATE.parent / "state_ready").exists())
 
-    def test_one_post_batches_every_hit(self):
+    def test_one_post_batches_every_hit_as_one_slot(self):
         calls = []
 
         def record(payload, cfg):
@@ -298,77 +403,95 @@ class DetectorTests(unittest.TestCase):
             return "posted"
 
         detector.send = record
-        self.assertTrue(self.cycle([
-            asset("AAA", pct_24h=30),
-            asset("BBB", pct_24h=12),
-        ]))
+        self.assertTrue(self.cycle([asset("AAA", pct_24h=30), asset("BBB", pct_24h=12)]))
         self.assertEqual(len(calls), 1)
         self.assertEqual({p["coin"] for p in calls[0]}, {"AAA", "BBB"})
         self.assertEqual(self.read_state()["wakes"]["2026-06-15"], 1)
+        self.assertEqual(self.read_state()["wakes_hour"]["2026-06-15T12"], 1)
 
-    def test_max_candle_calls_keeps_the_hottest(self):
+    def test_prefilter_keeps_the_hottest_and_the_15m_move(self):
         seen = []
 
-        def candles(coin, hours):
+        def candles(coin, interval, n_bars):
             seen.append(coin)
-            return make_candles()
+            return hit_1h() if interval == "1h" else quiet_15m()
 
         self.assertTrue(self.cycle(
-            [asset("BBB", pct_24h=12), asset("AAA", pct_24h=40)],
+            [asset("BBB", pct_24h=9), asset("AAA", pct_24h=40), asset("CCC", pct_24h=12)],
             candle_fn=candles,
             cfg=load_cfg(max_candle_calls=1),
         ))
-        self.assertEqual(seen, ["AAA"])
+        self.assertEqual(set(seen), {"AAA"})
+        with (detector.STATE.parent / "scans" / "2026-06-15.csv").open(encoding="utf-8") as fh:
+            results = {row["coin"]: row["result"] for row in csv.DictReader(fh)}
+        self.assertEqual(results["AAA"], "alerta")
+        self.assertEqual(results["BBB"], "fuera del top")
+        self.assertEqual(results["CCC"], "fuera del top")
 
-    def test_prefilter_uses_mark_from_about_an_hour_ago(self):
-        seen = []
+        seen.clear()
 
-        def candles(coin, hours):
-            seen.append((coin, hours))
-            return make_candles()
+        def quiet(coin, interval, n_bars):
+            seen.append(coin)
+            if interval == "1h":
+                return bars(40, last_pct=0.3, last_v=10.0)
+            return quiet_15m()
 
-        state = {"marks": [{"ts": NOW - 3600, "m": {"AAA": 100.0}}], "last_fire": {}, "wakes": {}}
+        state = {"marks": [{"ts": NOW - 900, "m": {"ZZZ": 100.0}, "oi": {}}], "last_fire": {}, "wakes": {}}
         self.assertTrue(self.cycle(
-            [asset("AAA", mark=110.0, pct_24h=1.0)],
+            [asset("ZZZ", mark=104.0, pct_24h=0.5)],
+            candle_fn=quiet,
+            state=state,
+        ))
+        self.assertIn("ZZZ", seen)
+        day = detector.STATE.parent / "scans" / "2026-06-15.csv"
+        with day.open(encoding="utf-8") as fh:
+            results = {row["coin"]: row["result"] for row in csv.DictReader(fh)}
+        self.assertEqual(results["ZZZ"], "no llega")
+
+        seen.clear()
+        state = {"marks": [{"ts": NOW - 120, "m": {"ZZZ": 100.0}}], "last_fire": {}, "wakes": {}}
+        self.assertTrue(self.cycle(
+            [asset("ZZZ", mark=110.0, pct_24h=0.2)],
             candle_fn=candles,
             state=state,
         ))
-        self.assertEqual([c for c, _ in seen], ["AAA"])
-        self.assertEqual(seen[0][1], load_cfg()["avg_window_hours"] + 3)
-        self.assertEqual(len(self.read_state()["marks"]), 2)
-
-    def test_recent_mark_does_not_count_as_one_hour(self):
-        seen = []
-        detector.candles = lambda coin, hours: seen.append(coin)
-        state = {"marks": [{"ts": NOW - 600, "m": {"AAA": 100.0}}], "last_fire": {}, "wakes": {}}
-        self.assertTrue(self.cycle(
-            [asset("AAA", mark=110.0, pct_24h=1.0)],
-            candle_fn=lambda coin, hours: seen.append(coin) or make_candles(),
-            state=state,
-        ))
         self.assertEqual(seen, [])
 
-    def test_illiquid_names_are_not_fetched(self):
+    def test_illiquid_and_thin_hip3_are_not_fetched(self):
         seen = []
-        self.assertTrue(self.cycle(
-            [asset("AAA", pct_24h=40, day=1000)],
-            candle_fn=lambda coin, hours: seen.append(coin) or make_candles(),
-        ))
-        self.assertEqual(seen, [])
-        self.assertIn("status=none", detector.LOG.read_text(encoding="utf-8"))
 
-    def test_one_bad_candle_does_not_drop_the_other_or_the_state(self):
-        def candles(coin, hours):
-            if coin == "BAD":
-                raise RuntimeError("429 Too Many Requests")
-            return make_candles()
+        def candles(coin, interval, n_bars):
+            seen.append(coin)
+            return hit_1h() if interval == "1h" else quiet_15m()
 
         self.assertTrue(self.cycle([
-            asset("BAD", pct_24h=30),
-            asset("GOOD", pct_24h=12),
+            asset("DUST", pct_24h=40, day=1_000),
+            asset("HIP", dex="xyz", pct_24h=40, day=2_000_000, oi=100_000),
+            asset("OK", dex="xyz", pct_24h=40, day=2_000_000, oi=600_000),
         ], candle_fn=candles))
-        self.assertEqual(self.alerts()[0]["alerts"][0]["coin"], "GOOD")
-        self.assertIn("GOOD", self.read_state()["marks"][-1]["m"])
+        self.assertEqual(set(seen), {"OK"})
+
+    def test_scan_files_and_summary_and_retention(self):
+        summary = self.tmp.name + "/summary.md"
+        os.environ["GITHUB_STEP_SUMMARY"] = summary
+        scans = detector.STATE.parent / "scans"
+        scans.mkdir(parents=True)
+        (scans / "2026-05-01.csv").write_text("ts_madrid,dex\nold\n", encoding="utf-8")
+        (scans / "2026-06-10.csv").write_text("ts_madrid,dex\nkeep\n", encoding="utf-8")
+        self.assertTrue(self.cycle([asset("AAA")]))
+        text = Path(summary).read_text(encoding="utf-8")
+        self.assertIn("Hora (Madrid): 2026-06-15 12:30", text)
+        self.assertIn("Perps revisados:", text)
+        self.assertIn("| dex | coin | 15m % | 1h % |", text)
+        self.assertIn("AAA", text)
+        self.assertIn("AAA", self.latest())
+        daily = scans / "2026-06-15.csv"
+        with daily.open(encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        self.assertEqual(rows[0]["coin"], "AAA")
+        self.assertEqual(rows[0]["result"], "alerta")
+        self.assertFalse((scans / "2026-05-01.csv").exists())
+        self.assertTrue((scans / "2026-06-10.csv").exists())
 
     def test_failed_scan_does_not_touch_state(self):
         detector.STATE.write_text('{"marks":[{"ts":1,"m":{"AAA":1}}],"last_fire":{},"wakes":{}}', encoding="utf-8")
@@ -395,8 +518,8 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(detector.STATE.read_bytes(), before)
 
     def test_corrupt_state_is_not_overwritten(self):
-        detector.scan = lambda: snap([asset("AAA", pct_24h=20)])
-        detector.candles = lambda coin, hours: make_candles()
+        detector.scan = lambda: snap([asset("AAA")])
+        detector.candles = route()
         detector.STATE.write_text("{{{", encoding="utf-8")
         with self.assertRaises(RuntimeError):
             detector.run_cycle(load_cfg())
@@ -438,6 +561,19 @@ class DetectorTests(unittest.TestCase):
         self.assertNotIn("super-secret-path", leaked)
         self.assertNotIn(SECRET_URL, leaked)
         self.assertIn("webhook error:", leaked)
+
+    def test_scan_output_does_not_contain_secrets(self):
+        os.environ["EXPLOSION_WEBHOOK_URL"] = SECRET_URL
+        os.environ["EXPLOSION_WEBHOOK_AUTH"] = SECRET_AUTH
+        urllib.request.urlopen = lambda req, timeout=20: (_ for _ in ()).throw(
+            RuntimeError(f"fail url={req.full_url} auth={req.get_header('Authorization')}")
+        )
+        self.assertTrue(self.cycle([asset("AAA")]))
+        blob = self.latest() + detector.STATE.read_text(encoding="utf-8")
+        blob += (detector.STATE.parent / "scans" / "2026-06-15.csv").read_text(encoding="utf-8")
+        self.assertNotIn("SUPERSECRETTOKEN", blob)
+        self.assertNotIn("super-secret-path", blob)
+        self.assertNotIn(SECRET_URL, blob)
 
     def test_send_puts_full_header_line_and_key_fallback(self):
         os.environ["EXPLOSION_WEBHOOK_URL"] = SECRET_URL
@@ -481,6 +617,7 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(calls[0][0]["message"], "POST de prueba manual")
         st = self.read_state()
         self.assertEqual(st["wakes"], {})
+        self.assertEqual(st.get("wakes_hour") or {}, {})
         self.assertEqual(st["last_fire"], {})
         self.assertEqual(self.alerts()[-1]["status"], "test_posted")
         self.assertIn("force_test status=posted", detector.LOG.read_text(encoding="utf-8"))

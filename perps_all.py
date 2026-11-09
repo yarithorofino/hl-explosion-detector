@@ -32,9 +32,13 @@ _next_ok = 0.0
 
 
 def _body_weight(body):
-    # candleSnapshot is 20 plus 1 per 60 candles. A ~27h window is one extra unit.
+    # candleSnapshot is 20 plus 1 per 60 candles returned. Estimate from the window.
     if body.get("type") == "candleSnapshot":
-        return 22
+        req = body.get("req") or {}
+        span = max(0, int(req.get("endTime") or 0) - int(req.get("startTime") or 0))
+        step = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000}.get(req.get("interval"), 3_600_000)
+        n = max(1, span // step + 1) if span else 30
+        return 20 + (n + 59) // 60
     return 20
 
 
@@ -177,13 +181,26 @@ def scan():
             if u.get("isDelisted"):
                 continue
             mark, prev = f(c.get("markPx")), f(c.get("prevDayPx"))
+            oracle, premium = f(c.get("oraclePx")), f(c.get("premium"))
+            funding = f(c.get("funding"))
             oi = f(c.get("openInterest"))
+            # API premium and funding are hourly decimals (0.0001 = 0.01%).
+            if premium is not None:
+                premium_pct = round(premium * 100, 4)
+            elif mark and oracle:
+                premium_pct = round((mark / oracle - 1) * 100, 4)
+            else:
+                premium_pct = None
             assets.append({
                 "dex": dex or "main", "coin": u["name"], "mark": mark, "prevDayPx": prev,
+                "oracle": oracle,
                 "pct_24h": round((mark / prev - 1) * 100, 2) if mark and prev else None,
                 "dayNtlVlm": f(c.get("dayNtlVlm")), "oi_coins": oi,
                 "oi_usd": round(oi * mark, 2) if oi is not None and mark else None,
-                "funding": f(c.get("funding")), "maxLeverage": u.get("maxLeverage"),
+                "funding": funding,
+                "funding_pct": round(funding * 100, 6) if funding is not None else None,
+                "premium": premium, "premium_pct": premium_pct,
+                "maxLeverage": u.get("maxLeverage"),
             })
     now = datetime.now(MADRID)
     snap = {"collected_at": now.isoformat(timespec="seconds"), "ts": int(time.time()),
