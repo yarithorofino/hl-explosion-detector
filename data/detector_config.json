@@ -1,0 +1,17 @@
+{
+  "pct_1h_min": 8.0,
+  "vol_mult_min": 5.0,
+  "vol_1h_min_usd": 50000,
+  "avg_window_hours": 24,
+  "prefilter_pct_1h": 4.0,
+  "prefilter_pct_24h": 8.0,
+  "prefilter_min_day_ntl_usd": 50000,
+  "max_candle_calls": 25,
+  "cooldown_hours": 4,
+  "max_wakes_per_day": 8,
+  "quiet_start_hour": 0,
+  "quiet_end_hour": 8,
+  "webhook_auth_header": "Authorization",
+  "webhook_auth_format": "Bearer {key}",
+  "_note": "URL y cabecera por EXPLOSION_WEBHOOK_URL y EXPLOSION_WEBHOOK_AUTH (la linea completa, p. ej. Authorization: Bearer ...). Sin ellas, dry-run. No las guardes en el repositorio."
+}

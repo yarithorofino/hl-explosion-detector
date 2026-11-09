@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+logs/
+data/detector_state.json
+data/perps_all.json
+data/detector_backtest.json
+data/*.tmp
+data/state_ready
+data/run_summary.txt
+signals/*.tmp
+signals/explosion_alerts.jsonl
