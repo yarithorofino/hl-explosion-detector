@@ -1,0 +1,65 @@
+# Detector de explosiones de perpetuos en Hyperliquid.
+# El cron solo corre cuando este fichero está en la rama por defecto (main).
+# Los secrets se pasan por el entorno del paso y no se imprimen.
+
+name: Detector de explosiones
+
+on:
+  schedule:
+    # UTC. GitHub puede arrancar el job unos minutos más tarde.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      force_test_post:
+        description: "Enviar un POST de prueba al webhook"
+        required: false
+        default: false
+        type: boolean
+
+# Una sola ejecución a la vez. La que ya corre termina y guarda el estado;
+# la siguiente espera. No se cancelan entre sí.
+concurrency:
+  group: explosion-detector
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  detect:
+    name: detectar
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 1
+
+      - name: Preparar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restaurar estado
+        run: bash scripts/restore_state.sh
+
+      - name: Ejecutar detector
+        env:
+          EXPLOSION_WEBHOOK_URL: ${{ secrets.EXPLOSION_WEBHOOK_URL }}
+          EXPLOSION_WEBHOOK_AUTH: ${{ secrets.EXPLOSION_WEBHOOK_AUTH }}
+          # En un cron, inputs no viene informado: el resultado es la cadena false.
+          FORCE_TEST_POST: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.force_test_post == 'true' || inputs.force_test_post == true) && 'true' || 'false' }}
+          PYTHONUNBUFFERED: "1"
+        run: python detector.py
+
+      # Si el ciclo falló antes de escribir estado, no hay data/state_ready
+      # y esta rama no se toca. Un fallo del POST de prueba sí guarda la memoria.
+      - name: Guardar estado
+        if: ${{ !cancelled() && hashFiles('data/state_ready') != '' }}
+        run: bash scripts/save_state.sh
