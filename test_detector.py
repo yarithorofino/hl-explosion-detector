@@ -216,7 +216,13 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(cfg["liquidity_min_day_ntl_usd"], 300_000)
         self.assertEqual(cfg["hip3_min_oi_usd"], 500_000)
         self.assertEqual(cfg["tradable_min_day_ntl_usd"], 1_000_000)
-        self.assertEqual(cfg["max_alerts_per_day"], 6)
+        self.assertEqual(cfg["max_alerts_per_day"], 10)
+        self.assertEqual(cfg["legacy_pct_1h"], 8.0)
+        self.assertEqual(cfg["escalera_pct"], 10.0)
+        self.assertEqual(cfg["escalera_candles"], 3)
+        self.assertEqual(cfg["escalera_min_aligned"], 2)
+        self.assertFalse(cfg["escalera_ignore_quiet_hours"])
+        self.assertEqual(cfg["prefilter_pct_3h"], 6.0)
         self.assertEqual(cfg["max_alerts_per_hour"], 2)
         self.assertEqual(cfg["cooldown_hours"], 4)
         self.assertEqual(cfg["quiet_start_hour"], 0)
@@ -260,7 +266,7 @@ class DetectorTests(unittest.TestCase):
                  "last_fire": {}, "wakes": {}}
         self.assertTrue(self.cycle([asset("AAA", oi=150.0)], state=state))
         item = self.alerts()[0]["alerts"][0]
-        self.assertEqual(item["trigger"], "1h_atr")
+        self.assertEqual(item["trigger"], "1h_atr+1h_legacy")
         self.assertEqual(item["floor_pct"], 5.0)
         self.assertGreaterEqual(abs(item["pct_1h"]), 5)
         self.assertGreaterEqual(item["vol_1h_usd"], 100_000)
@@ -306,6 +312,7 @@ class DetectorTests(unittest.TestCase):
         self.assertNotIn("MEME", by_coin)
         self.assertEqual(by_coin["BTC"]["floor_pct"], 3.0)
         self.assertEqual(by_coin["BTC"]["trigger"], "1h_atr")
+        self.assertNotIn("1h_legacy", by_coin["BTC"]["trigger"])
         text = self.latest()
         self.assertIn("alerta", text)
         self.assertIn("no llega", text)
@@ -364,11 +371,11 @@ class DetectorTests(unittest.TestCase):
         detector.send = forbid_send
         self.assertTrue(self.cycle(
             [asset("AAA")],
-            state={"marks": [], "last_fire": {}, "wakes": {"2026-06-15": 6}, "wakes_hour": {}},
+            state={"marks": [], "last_fire": {}, "wakes": {"2026-06-15": 10}, "wakes_hour": {}},
         ))
         self.assertEqual(self.alerts()[0]["status"], "daily_cap_logged")
         self.assertIn("tope", self.latest())
-        self.assertEqual(self.read_state()["wakes"]["2026-06-15"], 6)
+        self.assertEqual(self.read_state()["wakes"]["2026-06-15"], 10)
 
         self.assertTrue(self.cycle(
             [asset("BBB", pct_24h=20)],
@@ -524,6 +531,81 @@ class DetectorTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             detector.run_cycle(load_cfg())
         self.assertEqual(detector.STATE.read_text(encoding="utf-8"), "{{{")
+
+    def test_escalera_sets_its_label_and_can_ignore_quiet_hours(self):
+        def candles(coin, interval, n_bars):
+            if interval != "1h":
+                return quiet_15m()
+            cs = bars(24, last_pct=0.0, last_v=10.0)
+            price = 100.0
+            start = cs[-3]["t"]
+            built = cs[:-3]
+            for k in range(3):
+                o = price
+                c = round(price * 1.04, 4)
+                built.append({
+                    "t": start + k * 3_600_000, "o": o, "h": c + 0.3, "l": o - 0.05, "c": c, "v": 20,
+                })
+                price = c
+            return built
+
+        self.freeze(3)
+        self.assertTrue(self.cycle([asset("STEP")], candle_fn=candles))
+        self.assertEqual(self.alerts()[0]["status"], "quiet_hours_logged")
+        self.assertEqual(self.alerts()[0]["alerts"][0]["label"], "escalera")
+        self.assertEqual(self.alerts()[0]["alerts"][0]["trigger"], "3h_escalera")
+        self.assertIn("silencio", self.latest())
+
+        self.assertTrue(self.cycle(
+            [asset("STEP")],
+            candle_fn=candles,
+            cfg=load_cfg(escalera_ignore_quiet_hours=True),
+            state={"marks": [], "last_fire": {}, "wakes": {}, "wakes_hour": {}},
+        ))
+        self.assertEqual(self.alerts()[-1]["status"], "dry_run")
+        self.assertTrue(self.alerts()[-1]["alerts"][0]["tradable"])
+
+    def test_three_hour_move_enters_the_candle_set(self):
+        seen = []
+
+        def candles(coin, interval, n_bars):
+            seen.append(coin)
+            return hit_1h() if interval == "1h" else quiet_15m()
+
+        # 4h old: inside the 3h window (2h–5h) and outside the 1h window (50min–3h).
+        state = {
+            "marks": [{"ts": NOW - 4 * 3600, "m": {"SLOW": 100.0, "QUIET": 100.0}, "oi": {}}],
+            "last_fire": {}, "wakes": {},
+        }
+        self.assertTrue(self.cycle([
+            asset("SLOW", mark=107.0, pct_24h=1.0),
+            asset("QUIET", mark=104.0, pct_24h=1.0),
+            asset("INIT", mark=152.0, pct_24h=52.0),
+        ], candle_fn=candles, state=state))
+        self.assertIn("SLOW", seen)
+        self.assertIn("INIT", seen)
+        self.assertNotIn("QUIET", seen)
+
+    def test_init_9_nov_replay(self):
+        raw = json.loads(Path("tests/fixtures/init_2026-11-09.json").read_text(encoding="utf-8"))
+        cfg = load_cfg()
+        events = detector.replay_candles(raw["candles_1h"], raw["candles_15m"], cfg, floor=5.0)
+        stair = [e for e in events if e["interval"] == "1h" and "3h_escalera" in e["triggers"]]
+        nineteen = [e for e in stair if e["madrid"] == "2026-11-09 19:00"]
+        self.assertEqual(len(nineteen), 1, stair)
+        self.assertAlmostEqual(nineteen[0]["close"], 0.1468, places=4)
+        twenty = next(e for e in events if e["interval"] == "1h" and e["madrid"] == "2026-11-09 20:00")
+        self.assertIn("1h_legacy", twenty["triggers"])
+        self.assertNotIn("1h_atr", twenty["triggers"])
+        self.assertGreater(twenty["pct"], 11)
+        self.assertGreater(twenty["vol_mult"], 5)
+        self.assertAlmostEqual(twenty["close"], 0.164, places=3)
+        early = [e for e in events if "15m_early" in e["triggers"] and e["madrid"] >= "2026-11-09 18:00"]
+        self.assertTrue(early)
+        self.assertEqual(early[0]["madrid"], "2026-11-09 21:00")
+        self.assertGreater(early[0]["pct"], 4)
+        self.assertGreater(early[0]["vol_mult"], 5)
+        self.assertAlmostEqual(early[0]["open"], 0.16385, places=4)
 
     def test_alert_log_is_capped(self):
         path = detector.ALERTS
