@@ -2,12 +2,21 @@
 """Explosion detector for Hyperliquid perps (main + HIP-3). Analysis only, never trades.
 
 Live:     python3 detector.py
-Backtest: python3 detector.py --backtest [hours]
+Backtest: python3 detector.py --backtest [hours]   (1h rule only)
 Test POST: python3 detector.py --force-test
 
-Trigger: |1h change| >= pct_1h_min AND 1h notional >= vol_mult_min x avg hourly
-notional (prior avg_window_hours) AND 1h notional >= vol_1h_min_usd.
-Config: data/detector_config.json.
+Direction-neutral. A name alerts on either:
+  1h_atr:    |1h move| >= atr_mult x ATR14 (in %) AND >= the floor
+             (floor_pct_major for majors, floor_pct_other otherwise),
+             1h notional >= vol_mult_min x the prior 24h hourly average
+             AND >= vol_1h_min_usd
+  15m_early: |15m move| >= pct_15m_min, 15m notional >= vol_mult_min x the
+             prior 24h average 15m bar AND >= vol_15m_min_usd
+
+Majors: names in major_coins, plus any main-dex perp whose 24h notional
+is >= major_day_ntl_usd. HIP-3 names do not become majors from volume alone.
+Liquidity: 24h notional >= liquidity_min_day_ntl_usd, and non-main dexes
+also need OI >= hip3_min_oi_usd.
 
 Webhook URL and auth come from the environment (never from this file):
   EXPLOSION_WEBHOOK_URL
@@ -15,13 +24,14 @@ Webhook URL and auth come from the environment (never from this file):
 If either is missing the cycle still runs, but no POST is made (dry-run).
 A failed read of Hyperliquid does not rewrite data/detector_state.json.
 """
+import csv
 import json
 import os
 import sys
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -35,12 +45,22 @@ ALERTS = ROOT / "signals" / "explosion_alerts.jsonl"
 LOG = ROOT / "logs" / "detector.log"
 MADRID = ZoneInfo("Europe/Madrid")
 H = 3600
+M15 = 900
 ALERT_KEEP = 300
 _CFG_KEYS = (
-    "pct_1h_min", "vol_mult_min", "vol_1h_min_usd", "avg_window_hours",
-    "prefilter_pct_1h", "prefilter_pct_24h", "prefilter_min_day_ntl_usd",
-    "max_candle_calls", "cooldown_hours", "max_wakes_per_day",
-    "quiet_start_hour", "quiet_end_hour",
+    "atr_period", "atr_mult", "floor_pct_major", "floor_pct_other", "major_coins",
+    "major_day_ntl_usd", "vol_mult_min", "vol_1h_min_usd", "vol_15m_min_usd",
+    "pct_15m_min", "avg_window_hours", "avg_window_15m",
+    "liquidity_min_day_ntl_usd", "hip3_min_oi_usd", "tradable_min_day_ntl_usd",
+    "exhaustion_wick_pct", "prefilter_pct_15m", "prefilter_pct_1h", "prefilter_pct_24h",
+    "prefilter_15m_min_age_sec", "prefilter_15m_max_age_sec", "prefilter_15m_target_sec",
+    "prefilter_1h_min_age_sec", "prefilter_1h_max_age_sec", "prefilter_1h_target_sec",
+    "max_candle_calls", "cooldown_hours", "max_alerts_per_day", "max_alerts_per_hour",
+    "quiet_start_hour", "quiet_end_hour", "scan_keep_days",
+)
+_SCAN_HEADERS = (
+    "dex", "coin", "15m %", "1h %", "24h %", "mult 1h", "vol 24h", "OI",
+    "funding %", "ATR %", "suelo", "resultado",
 )
 
 
@@ -106,6 +126,14 @@ def _finite_num(v):
     return v > 0
 
 
+def _num(v):
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    if v != v or v in (float("inf"), float("-inf")):
+        return None
+    return float(v)
+
+
 def load_cfg():
     if not CFG.exists():
         raise RuntimeError(f"falta {CFG}")
@@ -113,12 +141,14 @@ def load_cfg():
     missing = [k for k in _CFG_KEYS if k not in cfg]
     if missing:
         raise RuntimeError("config sin " + ", ".join(missing))
+    if not isinstance(cfg["major_coins"], list) or not cfg["major_coins"]:
+        raise RuntimeError("config major_coins debe ser una lista con nombres")
     return cfg
 
 
 def load_state():
     if not STATE.exists() or STATE.stat().st_size == 0:
-        return {"marks": [], "last_fire": {}, "wakes": {}}
+        return {"marks": [], "last_fire": {}, "wakes": {}, "wakes_hour": {}}
     try:
         st = json.loads(STATE.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
@@ -133,8 +163,15 @@ def load_state():
         if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not isinstance(m, dict):
             continue
         clean = {str(k): v for k, v in m.items() if _finite_num(v)}
-        if clean:
-            marks.append({"ts": float(ts), "m": clean})
+        if not clean:
+            continue
+        item = {"ts": float(ts), "m": clean}
+        oi = s.get("oi")
+        if isinstance(oi, dict):
+            clean_oi = {str(k): v for k, v in oi.items() if _finite_num(v)}
+            if clean_oi:
+                item["oi"] = clean_oi
+        marks.append(item)
     last_fire = {}
     for k, v in (st.get("last_fire") or {}).items():
         if isinstance(v, bool) or not isinstance(v, (int, float)):
@@ -146,7 +183,11 @@ def load_state():
     for k, v in (st.get("wakes") or {}).items():
         if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
             wakes[str(k)] = v
-    return {"marks": marks, "last_fire": last_fire, "wakes": wakes}
+    wakes_hour = {}
+    for k, v in (st.get("wakes_hour") or {}).items():
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            wakes_hour[str(k)] = v
+    return {"marks": marks, "last_fire": last_fire, "wakes": wakes, "wakes_hour": wakes_hour}
 
 
 def log_webhook_mode():
@@ -168,10 +209,22 @@ def log_webhook_mode():
     return "dry_run"
 
 
-def candles(coin, hours):
+def _webhook_mode_label():
+    url = (os.environ.get("EXPLOSION_WEBHOOK_URL") or "").strip()
+    auth = (os.environ.get("EXPLOSION_WEBHOOK_AUTH") or "").strip()
+    key = (os.environ.get("EXPLOSION_WEBHOOK_KEY") or "").strip()
+    if url and (auth or key):
+        return "webhook configurado (secrets ocultos)"
+    return "dry-run (faltan secrets; no se envía nada)"
+
+
+def candles(coin, interval, bars):
+    step = H if interval == "1h" else M15
     end = int(time.time() * 1000)
-    data = post({"type": "candleSnapshot", "req": {"coin": coin, "interval": "1h",
-                 "startTime": end - hours * H * 1000, "endTime": end}})
+    data = post({"type": "candleSnapshot", "req": {
+        "coin": coin, "interval": interval,
+        "startTime": end - int(bars) * step * 1000, "endTime": end,
+    }})
     if not isinstance(data, list):
         raise RuntimeError("respuesta de velas no es una lista")
     return data
@@ -181,18 +234,364 @@ def ntl(c):  # notional of a candle ~ base volume x typical price
     return float(c["v"]) * (float(c["h"]) + float(c["l"]) + float(c["c"])) / 3
 
 
-def eval_bar(cs, i, cfg):
-    """Evaluate bar i against prior window. Returns metrics dict or None."""
-    w = cfg["avg_window_hours"]
-    if i < 6: return None
-    prior = cs[max(0, i - w):i]
-    avg = sum(ntl(c) for c in prior) / len(prior)
-    o, c = float(cs[i]["o"]), float(cs[i]["c"])
-    pct = (c / o - 1) * 100 if o else 0
-    v = ntl(cs[i]); mult = v / avg if avg > 0 else float("inf")
-    hit = abs(pct) >= cfg["pct_1h_min"] and mult >= cfg["vol_mult_min"] and v >= cfg["vol_1h_min_usd"]
-    return {"pct_1h": round(pct, 2), "vol_1h_usd": round(v), "vol_mult": round(mult, 1), "hit": hit,
-            "bar_open_madrid": datetime.fromtimestamp(cs[i]["t"] / 1000, MADRID).strftime("%Y-%m-%d %H:%M")}
+def atr_pct(cs, i, period):
+    """SMA of the last `period` true ranges, as a percent of this bar's close."""
+    period = int(period)
+    if i < period:
+        return None
+    trs = []
+    for j in range(i - period + 1, i + 1):
+        prev = float(cs[j - 1]["c"])
+        h, l = float(cs[j]["h"]), float(cs[j]["l"])
+        trs.append(max(h - l, abs(h - prev), abs(l - prev)))
+    atr = sum(trs) / len(trs)
+    ref = float(cs[i]["c"]) or float(cs[i]["o"])
+    if not ref:
+        return None
+    return atr / ref * 100
+
+
+def wick_ratio_pct(c):
+    """Rejection wick, as a percent of the full range.
+
+    Up bar: upper wick. Down bar: lower wick. A doji uses the larger wick.
+    That is the wick in the direction of the impulse that did not hold,
+    which is what "posible agotamiento" refers to.
+    """
+    o, h, l, cl = (float(c["o"]), float(c["h"]), float(c["l"]), float(c["c"]))
+    rng = h - l
+    if rng <= 0:
+        return 0.0
+    upper = h - max(o, cl)
+    lower = min(o, cl) - l
+    if cl > o:
+        wick = upper
+    elif cl < o:
+        wick = lower
+    else:
+        wick = max(upper, lower)
+    return max(0.0, wick) / rng * 100
+
+
+def is_major(asset, cfg):
+    names = {str(c).upper() for c in cfg["major_coins"]}
+    if str(asset.get("coin") or "").upper() in names:
+        return True
+    if asset.get("dex") == "main" and (asset.get("dayNtlVlm") or 0) >= cfg["major_day_ntl_usd"]:
+        return True
+    return False
+
+
+def floor_for(asset, cfg):
+    return float(cfg["floor_pct_major"] if is_major(asset, cfg) else cfg["floor_pct_other"])
+
+
+def passes_liquidity(asset, cfg):
+    if not asset.get("mark"):
+        return False
+    if (asset.get("dayNtlVlm") or 0) < cfg["liquidity_min_day_ntl_usd"]:
+        return False
+    if asset.get("dex") != "main" and (asset.get("oi_usd") or 0) < cfg["hip3_min_oi_usd"]:
+        return False
+    return True
+
+
+def _bar_stats(cs, i, interval, cfg):
+    if i < 1 or i >= len(cs):
+        return None
+    try:
+        o, cl = float(cs[i]["o"]), float(cs[i]["c"])
+        pct = (cl / o - 1) * 100 if o else 0.0
+        vol = ntl(cs[i])
+        wick = wick_ratio_pct(cs[i])
+    except (TypeError, ValueError, KeyError):
+        return None
+    window = int(cfg["avg_window_hours"] if interval == "1h" else cfg["avg_window_15m"])
+    prior = cs[max(0, i - window):i]
+    avg = sum(ntl(c) for c in prior) / len(prior) if prior else 0.0
+    mult = (vol / avg) if avg > 0 else None
+    atr = None
+    if interval == "1h":
+        try:
+            atr = atr_pct(cs, i, cfg["atr_period"])
+        except (TypeError, ValueError, KeyError):
+            atr = None
+    min_i = int(cfg["atr_period"]) if interval == "1h" else 6
+    return {
+        "i": i, "pct": pct, "vol": vol, "vol_mult": mult, "atr_pct": atr,
+        "wick_ratio": wick, "enough": i >= min_i and len(prior) >= 6,
+        "bar_open_madrid": datetime.fromtimestamp(cs[i]["t"] / 1000, MADRID).strftime("%Y-%m-%d %H:%M"),
+    }
+
+
+def _is_hit(stats, interval, cfg, floor):
+    if not stats or not stats["enough"]:
+        return False
+    mult_ok = stats["vol_mult"] is not None and stats["vol_mult"] >= cfg["vol_mult_min"]
+    if interval == "1h":
+        if stats["atr_pct"] is None:
+            return False
+        move_ok = abs(stats["pct"]) >= cfg["atr_mult"] * stats["atr_pct"] and abs(stats["pct"]) >= floor
+        return move_ok and mult_ok and stats["vol"] >= cfg["vol_1h_min_usd"]
+    move_ok = abs(stats["pct"]) >= cfg["pct_15m_min"]
+    return move_ok and mult_ok and stats["vol"] >= cfg["vol_15m_min_usd"]
+
+
+def series_view(cs, interval, cfg, floor):
+    """Metrics for the more violent of the last closed bar and the live bar."""
+    if not isinstance(cs, list) or len(cs) < 2:
+        return None
+    stats = []
+    for i in (len(cs) - 2, len(cs) - 1):
+        s = _bar_stats(cs, i, interval, cfg)
+        if not s:
+            continue
+        s["hit"] = _is_hit(s, interval, cfg, floor)
+        stats.append(s)
+    if not stats:
+        return None
+    display = max(stats, key=lambda s: abs(s["pct"]))
+    hits = [s for s in stats if s["hit"]]
+    chosen = max(hits, key=lambda s: abs(s["pct"])) if hits else None
+    return {
+        "pct": display["pct"],
+        "vol": display["vol"],
+        "vol_mult": display["vol_mult"],
+        "atr_pct": display["atr_pct"] if interval == "1h" else None,
+        "wick_ratio": (chosen or display)["wick_ratio"],
+        "hit": bool(chosen),
+        "chosen": chosen,
+        "bar_open_madrid": (chosen or display)["bar_open_madrid"],
+    }
+
+
+def _pick_mark(marks, now, target, min_age, max_age):
+    pool = [s for s in marks if min_age <= now - s["ts"] <= max_age]
+    if not pool:
+        return None
+    return min(pool, key=lambda s: abs((now - s["ts"]) - target))
+
+
+def _pct_between(mark, prev):
+    if not mark or not prev:
+        return None
+    return (mark / prev - 1) * 100
+
+
+def _funding_pct(asset):
+    if asset.get("funding_pct") is not None:
+        return asset["funding_pct"]
+    raw = _num(asset.get("funding"))
+    return round(raw * 100, 6) if raw is not None else None
+
+
+def _premium_pct(asset):
+    if asset.get("premium_pct") is not None:
+        return asset["premium_pct"]
+    raw = _num(asset.get("premium"))
+    if raw is not None:
+        return round(raw * 100, 4)
+    mark, oracle = _num(asset.get("mark")), _num(asset.get("oracle"))
+    if mark and oracle:
+        return round((mark / oracle - 1) * 100, 4)
+    return None
+
+
+def _oi_change_pct(old, coin, oi_now):
+    if not old or not isinstance(old.get("oi"), dict):
+        return None
+    prev = old["oi"].get(coin)
+    if not prev or not oi_now:
+        return None
+    return (oi_now / prev - 1) * 100
+
+
+def _fmt(v, nd=2):
+    if v is None:
+        return "—"
+    if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+        return "—"
+    if nd == 0:
+        return f"{v:,.0f}"
+    return f"{v:,.{nd}f}"
+
+
+def _cell(text):
+    return str(text).replace("|", "/").replace("\n", " ")
+
+
+def render_scan_markdown(when, mode, n_perps, n_cands, n_series, n_alerts, n_sent, status, rows):
+    lines = [
+        "## Detector de explosiones",
+        "",
+        f"- Hora (Madrid): {when}",
+        f"- Modo: {mode}",
+        f"- Perps revisados: {n_perps}",
+        f"- Candidatos: {n_cands}",
+        f"- Series de velas leídas: {n_series}",
+        f"- Alertas en esta tanda: {n_alerts}",
+        f"- Alertas enviadas: {n_sent}",
+        f"- Estado del envío: `{status}`",
+        "",
+        "| " + " | ".join(_SCAN_HEADERS) + " |",
+        "| " + " | ".join("---" for _ in _SCAN_HEADERS) + " |",
+    ]
+    if not rows:
+        lines.append("| " + " | ".join("—" for _ in _SCAN_HEADERS) + " |")
+    for row in rows:
+        lines.append("| " + " | ".join(_cell(row[h]) for h in _SCAN_HEADERS) + " |")
+    lines.append("")
+    lines.append("Resultado: alerta (se incluye en el aviso), no llega (no cumple), pausa (cooldown), silencio (00:00–08:00, solo anotada), tope (máximo del día o de la hora), sin velas (la API no contestó), fuera del top (pasó el filtro pero no entró en las velas de este ciclo).")
+    return "\n".join(lines)
+
+
+def _csv_cell(v):
+    if v is None:
+        return ""
+    if isinstance(v, float):
+        return f"{v:.6g}"
+    text = str(v)
+    if text[:1] in "=+-@":
+        return "'" + text
+    return text
+
+
+def _scans_dir():
+    return STATE.parent / "scans"
+
+
+def write_scans(when, day, markdown, rows, keep_days):
+    directory = _scans_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    atomic_write(directory / "latest.md", markdown + "\n")
+    path = directory / f"{day}.csv"
+    previous = []
+    if path.exists():
+        previous = path.read_text(encoding="utf-8").splitlines()
+    header = ["ts_madrid", "dex", "coin", "pct_15m", "pct_1h", "pct_24h", "vol_mult_1h",
+              "day_ntl", "oi_usd", "funding_pct", "atr_pct", "floor_pct", "result"]
+    # Rewrite the file so a crash cannot leave a half line, and so the header exists once.
+    body = []
+    if previous:
+        start = 1 if previous[0].startswith("ts_madrid") else 0
+        body.extend(previous[start:])
+    buf_rows = []
+    for row in rows:
+        buf_rows.append([
+            when, row["dex"], row["coin"], _csv_cell(row["_pct_15m"]), _csv_cell(row["_pct_1h"]),
+            _csv_cell(row["_pct_24h"]), _csv_cell(row["_vol_mult"]), _csv_cell(row["_day"]),
+            _csv_cell(row["_oi"]), _csv_cell(row["_funding"]), _csv_cell(row["_atr"]),
+            _csv_cell(row["_floor"]), row["resultado"],
+        ])
+    import io
+    sio = io.StringIO()
+    writer = csv.writer(sio, lineterminator="\n")
+    writer.writerow(header)
+    for line in body:
+        if line.strip():
+            sio.write(line + "\n")
+    for item in buf_rows:
+        writer.writerow(item)
+    atomic_write(path, sio.getvalue())
+    cutoff = datetime.strptime(day, "%Y-%m-%d").date() - timedelta(days=int(keep_days) - 1)
+    for old in directory.glob("*.csv"):
+        try:
+            stamp = datetime.strptime(old.stem, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if stamp < cutoff:
+            old.unlink()
+
+
+def _row_from(asset, floor, view_1h, view_15m, result):
+    pct_15 = view_15m["pct"] if view_15m else None
+    pct_1h = view_1h["pct"] if view_1h else None
+    atr = None
+    vol_mult = None
+    if view_1h:
+        atr = view_1h.get("atr_pct")
+        vol_mult = view_1h.get("vol_mult")
+    return {
+        "dex": asset.get("dex") or "",
+        "coin": asset.get("coin") or "",
+        "15m %": _fmt(pct_15),
+        "1h %": _fmt(pct_1h),
+        "24h %": _fmt(asset.get("pct_24h")),
+        "mult 1h": _fmt(vol_mult, 1),
+        "vol 24h": _fmt(asset.get("dayNtlVlm"), 0),
+        "OI": _fmt(asset.get("oi_usd"), 0),
+        "funding %": _fmt(_funding_pct(asset), 5),
+        "ATR %": _fmt(atr, 2),
+        "suelo": _fmt(floor, 1),
+        "resultado": result,
+        "_pct_15m": None if pct_15 is None else round(pct_15, 4),
+        "_pct_1h": None if pct_1h is None else round(pct_1h, 4),
+        "_pct_24h": asset.get("pct_24h"),
+        "_vol_mult": None if vol_mult is None else round(vol_mult, 4),
+        "_day": asset.get("dayNtlVlm"),
+        "_oi": asset.get("oi_usd"),
+        "_funding": _funding_pct(asset),
+        "_atr": None if atr is None else round(atr, 4),
+        "_floor": floor,
+    }
+
+
+def _finite_round(v, nd):
+    n = _num(v)
+    if n is None:
+        return None
+    return round(n, nd)
+
+
+def build_alert(asset, floor, view_1h, view_15m, oi_change, nowm):
+    fired = []
+    if view_1h and view_1h["hit"]:
+        fired.append("1h_atr")
+    if view_15m and view_15m["hit"]:
+        fired.append("15m_early")
+    trigger = "+".join(fired)
+    wicks = []
+    for view in (view_1h, view_15m):
+        if view and view["hit"]:
+            wicks.append(view["wick_ratio"])
+    wick = max(wicks) if wicks else (view_1h or view_15m or {}).get("wick_ratio")
+    exhaustion = wick is not None and wick > asset.get("_exhaustion", 50)
+    day = asset.get("dayNtlVlm") or 0
+    tradable = day >= asset.get("_tradable_min", 0)
+    chosen_1h = (view_1h or {}).get("chosen") or {}
+    chosen_15 = (view_15m or {}).get("chosen") or {}
+    atr = None
+    if view_1h and view_1h.get("chosen") and view_1h["chosen"].get("atr_pct") is not None:
+        atr = view_1h["chosen"]["atr_pct"]
+    elif view_1h and view_1h.get("atr_pct") is not None:
+        atr = view_1h["atr_pct"]
+    return {
+        "dex": asset.get("dex"),
+        "coin": asset.get("coin"),
+        "trigger": trigger,
+        "pct_1h": _finite_round(chosen_1h.get("pct", (view_1h or {}).get("pct")), 2),
+        "pct_15m": _finite_round(chosen_15.get("pct", (view_15m or {}).get("pct")), 2),
+        "atr_pct": _finite_round(atr, 3),
+        "floor_pct": floor,
+        "vol_1h_usd": None if chosen_1h.get("vol") is None else round(chosen_1h.get("vol", 0)),
+        "vol_mult": _finite_round(chosen_1h.get("vol_mult"), 2),
+        "vol_15m_usd": None if chosen_15.get("vol") is None else round(chosen_15.get("vol", 0)),
+        "vol_15m_mult": _finite_round(chosen_15.get("vol_mult"), 2),
+        "mark": asset.get("mark"),
+        "dayNtlVlm": asset.get("dayNtlVlm"),
+        "oi_usd": asset.get("oi_usd"),
+        "oi_change_1h_pct": _finite_round(oi_change, 2),
+        "funding_pct": _funding_pct(asset),
+        "premium_pct": _premium_pct(asset),
+        "wick_ratio": _finite_round(wick, 1),
+        "exhaustion_flag": bool(exhaustion),
+        "exhaustion_label": "posible agotamiento" if exhaustion else None,
+        "early_floor_pct": asset.get("_early_floor") if "15m_early" in fired else None,
+        "tradable": bool(tradable),
+        "label": "operable" if tradable else "vigilancia, no operable",
+        "maxLeverage": asset.get("maxLeverage"),
+        "detected_at_madrid": nowm.strftime("%Y-%m-%d %H:%M"),
+    }
 
 
 def append_jsonl(path, record, limit=ALERT_KEEP):
@@ -210,39 +609,41 @@ def backtest(hours=48):
     cfg = load_cfg()
     assets = json.loads(PERPS.read_text(encoding="utf-8"))["assets"]
     fires = []
+    bars = hours + cfg["avg_window_hours"] + cfg["atr_period"] + 2
     for a in assets:
+        if not passes_liquidity(a, cfg):
+            continue
         try:
-            cs = candles(a["coin"], hours + cfg["avg_window_hours"] + 1)
+            cs = candles(a["coin"], "1h", bars)
         except Exception as e:
             print("err", a["coin"], redact(e))
             continue
+        floor = floor_for(a, cfg)
         cut = time.time() * 1000 - hours * H * 1000
         for i in range(len(cs)):
-            if cs[i]["t"] < cut:
+            if cs[i].get("t", 0) < cut:
                 continue
-            m = eval_bar(cs, i, cfg)
-            if m and m["hit"]:
-                fires.append({"coin": a["coin"], **m})
+            stats = _bar_stats(cs, i, "1h", cfg)
+            if stats and _is_hit(stats, "1h", cfg, floor):
+                fires.append({"coin": a["coin"], "dex": a["dex"], "floor_pct": floor, **{
+                    k: stats[k] for k in ("pct", "vol", "vol_mult", "atr_pct", "bar_open_madrid")
+                }})
         time.sleep(0.05)
     fires.sort(key=lambda x: x["bar_open_madrid"])
     for x in fires:
-        print(x)
-    print(f"TOTAL fires {len(fires)} en {hours}h sobre {len(assets)} perps -> {len(fires)*24/hours:.1f}/dia")
-    out = ROOT / "data" / "detector_backtest.json"
-    atomic_write(out, json.dumps({"hours": hours, "cfg": cfg, "fires": fires}, indent=1, ensure_ascii=False))
+        print({k: x[k] for k in x if k != "vol_mult" or x[k] is None or abs(x[k]) < 1e9})
+    print(f"TOTAL fires {len(fires)} en {hours}h sobre {len(assets)} perps -> {len(fires) * 24 / hours:.1f}/dia")
+    atomic_write(ROOT / "data" / "detector_backtest.json", json.dumps(
+        {"hours": hours, "fires": fires}, indent=1, ensure_ascii=False, default=str))
 
 
 def _mark_ready(summary_line):
-    # Follow STATE so tests that redirect the state file do not write into the repo.
     atomic_write(STATE.parent / "run_summary.txt", summary_line + "\n")
     atomic_write(STATE.parent / "state_ready", "ok\n")
 
 
 def run_cycle(cfg):
-    """One live cycle. Returns True only after a good scan has been saved locally.
-
-    A scan with no usable prices leaves the state file untouched.
-    """
+    """One live cycle. Returns True only after a good scan has been saved locally."""
     try:
         snap = scan()
     except Exception as e:
@@ -261,94 +662,145 @@ def run_cycle(cfg):
     now = time.time()
     nowm = datetime.now(MADRID)
     st["marks"] = [s for s in st["marks"] if now - s["ts"] < 25 * H]
-    old = min(
-        (s for s in st["marks"] if now - s["ts"] >= 50 * 60),
-        key=lambda s: abs(now - s["ts"] - H),
-        default=None,
+    old = _pick_mark(
+        st["marks"], now, cfg["prefilter_1h_target_sec"],
+        cfg["prefilter_1h_min_age_sec"], cfg["prefilter_1h_max_age_sec"],
     )
-    cands = []
+    prev = _pick_mark(
+        st["marks"], now, cfg["prefilter_15m_target_sec"],
+        cfg["prefilter_15m_min_age_sec"], cfg["prefilter_15m_max_age_sec"],
+    )
+    ranked = []
     for a in assets:
-        if not a["mark"] or (a["dayNtlVlm"] or 0) < cfg["prefilter_min_day_ntl_usd"]:
+        if not passes_liquidity(a, cfg):
             continue
-        p1 = None
-        if old and old["m"].get(a["coin"]):
-            p1 = (a["mark"] / old["m"][a["coin"]] - 1) * 100
-        hot = (p1 is not None and abs(p1) >= cfg["prefilter_pct_1h"]) or abs(a["pct_24h"] or 0) >= cfg["prefilter_pct_24h"]
-        if hot:
-            cands.append((abs(p1 or 0), abs(a["pct_24h"] or 0), a))
-    fresh = {}
+        p1 = _pct_between(a["mark"], (old or {}).get("m", {}).get(a["coin"]))
+        p15 = _pct_between(a["mark"], (prev or {}).get("m", {}).get(a["coin"]))
+        hot = (
+            (p15 is not None and abs(p15) >= cfg["prefilter_pct_15m"])
+            or (p1 is not None and abs(p1) >= cfg["prefilter_pct_1h"])
+            or abs(a.get("pct_24h") or 0) >= cfg["prefilter_pct_24h"]
+        )
+        if not hot:
+            continue
+        score = max(abs(p15 or 0), abs(p1 or 0), abs(a.get("pct_24h") or 0))
+        ranked.append((score, a))
+    fresh_m, fresh_oi = {}, {}
     for a in assets:
         if a.get("mark") and _finite_num(a["mark"]):
-            fresh[a["coin"]] = a["mark"]
-    st["marks"].append({"ts": now, "m": fresh})
+            fresh_m[a["coin"]] = a["mark"]
+        if a.get("oi_usd") and _finite_num(a["oi_usd"]):
+            fresh_oi[a["coin"]] = a["oi_usd"]
+    st["marks"].append({"ts": now, "m": fresh_m, "oi": fresh_oi})
     if len(st["marks"]) > 200:
         st["marks"] = st["marks"][-200:]
-    cands.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    hits = []
-    n_velas = min(len(cands), int(cfg["max_candle_calls"]))
-    for _, _, a in cands[: int(cfg["max_candle_calls"])]:
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    top = ranked[: int(cfg["max_candle_calls"])]
+    bars_1h = int(cfg["avg_window_hours"]) + int(cfg["atr_period"]) + 3
+    bars_15 = int(cfg["avg_window_15m"]) + 8
+
+    rows = []
+    pending = []  # (asset, alert, row index) that passed the trigger and are not in cooldown
+    n_series = 0
+    for _, a in top:
+        floor = floor_for(a, cfg)
+        view_1h = view_15 = None
         try:
-            cs = candles(a["coin"], cfg["avg_window_hours"] + 3)
+            view_1h = series_view(candles(a["coin"], "1h", bars_1h), "1h", cfg, floor)
+            n_series += 1
         except Exception as e:
-            log(f"velas {a['coin']}: {e}")
-            continue
-        best = None
-        for i in (len(cs) - 2, len(cs) - 1):  # last closed bar + bar in progress
-            m = eval_bar(cs, i, cfg) if i >= 0 else None
-            if m and m["hit"]:
-                best = m
-        if best:
-            hits.append((a, best))
-    today = nowm.strftime("%Y-%m-%d")
-    quiet = cfg["quiet_start_hour"] <= nowm.hour < cfg["quiet_end_hour"]
-    payload = []
-    for a, m in hits:
-        if now - st["last_fire"].get(a["coin"], 0) < cfg["cooldown_hours"] * H:
+            log(f"velas 1h {a['coin']}: {e}")
+        try:
+            view_15 = series_view(candles(a["coin"], "15m", bars_15), "15m", cfg, floor)
+            n_series += 1
+        except Exception as e:
+            log(f"velas 15m {a['coin']}: {e}")
+        hit = bool((view_1h and view_1h["hit"]) or (view_15 and view_15["hit"]))
+        if view_1h is None and view_15 is None:
+            result = "sin velas"
+        elif not hit:
+            result = "no llega"
+        elif now - st["last_fire"].get(a["coin"], 0) < cfg["cooldown_hours"] * H:
+            result = "pausa"
             log(f"en pausa {a['coin']}")
-            continue
-        payload.append({
-            "dex": a["dex"], "coin": a["coin"], "pct_1h": m["pct_1h"], "vol_1h_usd": m["vol_1h_usd"],
-            "vol_mult": m["vol_mult"], "mark": a["mark"], "dayNtlVlm": a["dayNtlVlm"], "oi_usd": a["oi_usd"],
-            "maxLeverage": a["maxLeverage"], "detected_at_madrid": nowm.strftime("%Y-%m-%d %H:%M"),
-        })
+        else:
+            result = "alerta"
+        row = _row_from(a, floor, view_1h, view_15, result)
+        rows.append(row)
+        if result == "alerta":
+            enriched = dict(a)
+            enriched["_exhaustion"] = cfg["exhaustion_wick_pct"]
+            enriched["_tradable_min"] = cfg["tradable_min_day_ntl_usd"]
+            enriched["_early_floor"] = cfg["pct_15m_min"]
+            alert = build_alert(enriched, floor, view_1h, view_15, _oi_change_pct(old, a["coin"], a.get("oi_usd")), nowm)
+            pending.append(alert)
+    for _, a in ranked[int(cfg["max_candle_calls"]):]:
+        rows.append(_row_from(a, floor_for(a, cfg), None, None, "fuera del top"))
+
+    today = nowm.strftime("%Y-%m-%d")
+    hour_key = nowm.strftime("%Y-%m-%dT%H")
+    quiet = cfg["quiet_start_hour"] <= nowm.hour < cfg["quiet_end_hour"]
+    day_n = st["wakes"].get(today, 0)
+    hour_n = st["wakes_hour"].get(hour_key, 0)
     status = "none"
-    if payload:
+    sent_n = 0
+    counted = 0
+    if pending:
+        capped = day_n >= cfg["max_alerts_per_day"] or hour_n >= cfg["max_alerts_per_hour"]
         if quiet:
             status = "quiet_hours_logged"
-        elif st["wakes"].get(today, 0) >= cfg["max_wakes_per_day"]:
-            status = "daily_cap_logged"
+            for row in rows:
+                if row["resultado"] == "alerta":
+                    row["resultado"] = "silencio"
+        elif capped:
+            status = "hourly_cap_logged" if hour_n >= cfg["max_alerts_per_hour"] else "daily_cap_logged"
+            for row in rows:
+                if row["resultado"] == "alerta":
+                    row["resultado"] = "tope"
         else:
-            status = send(payload, cfg)
+            status = send(pending, cfg)
             if status in ("posted", "dry_run"):
-                st["wakes"][today] = st["wakes"].get(today, 0) + 1
-                for p in payload:
+                st["wakes"][today] = day_n + 1
+                st["wakes_hour"][hour_key] = hour_n + 1
+                for p in pending:
                     st["last_fire"][p["coin"]] = now
+                sent_n = len(pending) if status == "posted" else 0
+                counted = len(pending)
+            else:
+                counted = 0
         append_jsonl(ALERTS, {
-            "at": nowm.isoformat(timespec="seconds"), "status": status, "alerts": payload,
+            "at": nowm.isoformat(timespec="seconds"), "status": status, "alerts": pending,
         })
-        for p in payload:
-            log(f"alerta {p['coin']} dex={p['dex']} pct_1h={p['pct_1h']} vol_1h_usd={p['vol_1h_usd']} vol_mult={p['vol_mult']}")
-    cooldown_s = cfg["cooldown_hours"] * H
+        for p in pending:
+            log(
+                f"alerta {p['coin']} dex={p['dex']} trigger={p['trigger']} "
+                f"pct_1h={p['pct_1h']} pct_15m={p['pct_15m']} floor={p['floor_pct']} "
+                f"atr={p['atr_pct']} tradable={p['tradable']} exhaustion={p['exhaustion_flag']}"
+            )
     st["wakes"] = {k: v for k, v in st["wakes"].items() if k >= today}
+    st["wakes_hour"] = {k: v for k, v in st["wakes_hour"].items() if k == hour_key}
+    cooldown_s = cfg["cooldown_hours"] * H
     st["last_fire"] = {k: v for k, v in st["last_fire"].items() if now - v < cooldown_s}
     atomic_write(STATE, json.dumps(st, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
+
+    when = nowm.strftime("%Y-%m-%d %H:%M")
+    mode = _webhook_mode_label()
+    markdown = render_scan_markdown(
+        when, mode, snap.get("count"), len(ranked), n_series, len(pending), sent_n, status, rows,
+    )
+    print(markdown, flush=True)
+    write_summary(markdown.splitlines())
+    try:
+        write_scans(when, today, markdown, rows, cfg["scan_keep_days"])
+    except Exception as e:
+        log(f"no se pudo escribir el historial de scans: {e}")
     line = (
-        f"candidatos={len(cands)} velas={n_velas} hits={len(hits)} "
-        f"enviados={len(payload)} status={status} {[p['coin'] for p in payload]}"
+        f"candidatos={len(ranked)} velas={n_series} hits={len(pending)} "
+        f"enviados={counted if pending else 0} status={status} {[p['coin'] for p in pending]}"
     )
     log(line)
     _mark_ready(line)
-    _summary(_webhook_mode_label(), snap.get("count"), cands, n_velas, hits, payload, status)
     return True
-
-
-def _webhook_mode_label():
-    url = (os.environ.get("EXPLOSION_WEBHOOK_URL") or "").strip()
-    auth = (os.environ.get("EXPLOSION_WEBHOOK_AUTH") or "").strip()
-    key = (os.environ.get("EXPLOSION_WEBHOOK_KEY") or "").strip()
-    if url and (auth or key):
-        return "webhook configurado (secrets ocultos)"
-    return "dry-run (faltan secrets; no se envía nada)"
 
 
 def send(payload, cfg):
@@ -392,7 +844,7 @@ def send(payload, cfg):
 
 
 def send_test_post(cfg):
-    """Manual end-to-end POST. Does not spend the daily wake budget or a cooldown."""
+    """Manual end-to-end POST. Does not spend caps, quiet hours, or a cooldown."""
     nowm = datetime.now(MADRID)
     payload = [{
         "test": True,
@@ -400,7 +852,7 @@ def send_test_post(cfg):
         "message": "POST de prueba manual",
         "detected_at_madrid": nowm.strftime("%Y-%m-%d %H:%M"),
     }]
-    log("prueba manual: se intenta un POST aunque sea horario de silencio o no haya señales")
+    log("prueba manual: se intenta un POST aunque sea horario de silencio, tope o pausa")
     status = send(payload, cfg)
     log(f"force_test status={status}")
     try:
@@ -415,25 +867,6 @@ def send_test_post(cfg):
     if status == "post_failed":
         return 1
     return 0
-
-
-def _summary(mode_label, snap_count, cands, n_velas, hits, payload, status):
-    lines = [
-        "## Detector de explosiones",
-        "",
-        f"- Modo: {mode_label}",
-        f"- Perps leídos: {snap_count}",
-        f"- Candidatos: {len(cands)}",
-        f"- Revisados con velas: {n_velas}",
-        f"- Disparos: {len(hits)}",
-        f"- En el aviso: {len(payload)}",
-        f"- Estado del envío: `{status}`",
-    ]
-    if payload:
-        lines.append("- Activos: " + ", ".join(p["coin"] for p in payload))
-    else:
-        lines.append("- Activos: ninguno")
-    write_summary(lines)
 
 
 def live(force_test_post=False):

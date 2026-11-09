@@ -4,13 +4,20 @@ Este programa mira los perpetuos de Hyperliquid (el mercado principal y los de H
 
 Antes corría en un ordenador que se duerme. Ahora lo ejecuta GitHub cada 15 minutos, también con el ordenador apagado.
 
-Avisa cuando se cumplen las tres cosas a la vez:
+Avisa igual si el precio sube o si baja. Hay dos formas de saltar, y basta una:
 
-- el precio se ha movido un **8% o más** en la última hora
-- el volumen de esa hora es al menos **5 veces** la media de las 24 horas anteriores
-- y ese volumen es de al menos **50.000 dólares**
+- **Hora (1h_atr).** El movimiento de la última hora es al menos **3 veces** el ATR de 14 velas de 1 hora (el rango típico de esa hora, en %) y, además, no baja de un suelo: **3%** si es un grande y **5%** en el resto. El volumen de esa vela es al menos **5 veces** la media de las 24 horas anteriores y al menos **100.000 dólares**.
+- **Quince minutos (15m_early).** El movimiento de la vela de 15 minutos es de al menos **4%**, con un volumen de al menos **5 veces** la media de las velas de 15 minutos de las 24 horas anteriores y al menos **25.000 dólares**.
 
-Si en el mismo cuarto de hora saltan varios activos, van todos en **un solo aviso**. El mismo activo no se repite hasta pasadas **4 horas**. Como máximo hay **8 avisos al día**. De **00:00 a 08:00** (hora de Madrid) anota la señal pero no llama al webhook; a las 8 ya puede avisar.
+Grandes, con suelo del 3%: BTC, ETH y SOL (el nombre exacto del mercado) y, en el mercado principal, cualquier perp cuyo volumen de 24 horas sea de **100 millones de dólares** o más. Un mercado HIP-3 no se vuelve grande solo por volumen. La lista y el umbral están en `data/detector_config.json`.
+
+Para poder avisar hace falta liquidez: volumen de 24 horas de al menos **300.000 dólares**. Si no es el mercado principal (HIP-3), además el interés abierto tiene que ser de al menos **500.000 dólares**.
+
+Si el volumen de 24 horas es de menos de **1 millón**, el aviso sale igual, pero marcado `tradable: false` y `label: "vigilancia, no operable"`. A partir de 1 millón va `tradable: true` y `label: "operable"`.
+
+Si la mecha de rechazo de la vela que dispara (la de arriba cuando sube, la de abajo cuando baja) ocupa más del **50%** del rango, el aviso lleva `exhaustion_flag: true` y `exhaustion_label: "posible agotamiento"`.
+
+Si en el mismo cuarto de hora saltan varios, van todos en **un solo aviso**. El mismo activo no se repite hasta pasadas **4 horas**. Como máximo hay **6 avisos al día** y **2 por hora** (cada POST cuenta como uno, aunque lleve varios activos). De **00:00 a 08:00** (hora de Madrid) anota la señal pero no llama al webhook; a las 8 ya puede avisar. La prueba manual no gasta esos cupos.
 
 ## Qué tienes que hacer tú
 
@@ -70,7 +77,7 @@ Sin esto, el paso **Guardar estado** falla con un error 403 y cada ejecución em
    - `force_test status=dry_run` → faltan los secretos, o el nombre no coincide.
    - `force_test status=post_failed` y cerca `webhook error: HTTP 401` o `403` → la línea del secreto `EXPLOSION_WEBHOOK_AUTH` no es la que espera el webhook. Vuelve a copiarla.
 
-La prueba manda una lista con un solo objeto que dice que es una prueba, no un movimiento real. No gasta uno de los 8 avisos del día. Puedes lanzarla también de madrugada.
+La prueba manda una lista con un solo objeto que dice que es una prueba, no un movimiento real. No gasta el cupo del día ni el de la hora, y se puede lanzar de madrugada.
 
 Ejemplo de lo que recibe el webhook en la prueba:
 
@@ -85,19 +92,32 @@ Ejemplo de lo que recibe el webhook en la prueba:
 ]
 ```
 
-Un aviso de verdad tiene esta forma (varios activos irían uno detrás de otro, en la misma lista, en un solo POST):
+Un aviso de verdad tiene esta forma (varios activos irían uno detrás de otro, en la misma lista, en un solo POST). `funding_pct` y `premium_pct` van en porcentaje por hora (el dato de Hyperliquid es un decimal; 0,0000125 pasa a 0,00125%). `oi_change_1h_pct` es el cambio del interés abierto frente a hace una hora, o `null` si todavía no hay ese recuerdo. `trigger` vale `1h_atr`, `15m_early` o los dos unidos. `floor_pct` es el suelo de 1 hora de ese activo (3 o 5). `early_floor_pct` es el 4% del disparo de 15 minutos, cuando ese disparo ha saltado.
 
 ```json
 [
   {
     "dex": "main",
     "coin": "BTC",
-    "pct_1h": 9.5,
+    "trigger": "1h_atr",
+    "pct_1h": 4.2,
+    "pct_15m": 1.1,
+    "atr_pct": 0.8,
+    "floor_pct": 3.0,
+    "early_floor_pct": null,
     "vol_1h_usd": 2500000,
     "vol_mult": 6.2,
     "mark": 100000,
     "dayNtlVlm": 80000000,
     "oi_usd": 12000000,
+    "oi_change_1h_pct": 3.5,
+    "funding_pct": 0.00125,
+    "premium_pct": -0.0364,
+    "wick_ratio": 22.0,
+    "exhaustion_flag": false,
+    "exhaustion_label": null,
+    "tradable": true,
+    "label": "operable",
     "maxLeverage": 40,
     "detected_at_madrid": "2026-06-15 14:15"
   }
@@ -108,10 +128,22 @@ Un aviso de verdad tiene esta forma (varios activos irían uno detrás de otro, 
 
 En **Actions** → **Detector de explosiones** → la ejecución de ese cuarto de hora → job **detectar** → paso **Ejecutar detector**.
 
-El resumen de arriba del run dice cuántos perpetuos miró y si envió algo. En el texto del paso, la línea importante es parecida a esta:
+Arriba del run, el resumen en castellano trae la hora de Madrid, cuántos perpetuos miró, cuántos candidatos hubo, cuántas velas pidió y una tabla. Cada fila es un candidato, con dex, moneda, movimiento de 15 minutos, de 1 hora y de 24 horas, el múltiplo de volumen de 1 hora, el volumen de 24 horas, el interés abierto, el funding, el ATR, el suelo y el resultado:
+
+| Resultado | Qué ha pasado |
+| --- | --- |
+| `alerta` | Cumple y entra en el aviso de esta tanda. |
+| `no llega` | Se miró y no cumple. |
+| `pausa` | Cumpliría, pero ese activo avisó hace menos de 4 horas. |
+| `silencio` | Cumple, pero es de noche (00:00–08:00). Queda anotado y no se envía. |
+| `tope` | Cumple, pero ya van 6 avisos hoy o 2 en esta hora. |
+| `sin velas` | La API no devolvió las velas de ese nombre. |
+| `fuera del top` | Pasó el filtro previo, pero este ciclo solo pide velas de los 25 más movidos. |
+
+La misma tabla queda guardada para mirarla después (ver más abajo). En el texto del paso también hay una línea corta:
 
 ```
-candidatos=12 velas=12 hits=1 enviados=1 status=posted ['XYZ']
+candidatos=12 velas=24 hits=1 enviados=1 status=posted ['XYZ']
 ```
 
 Qué significa `status`:
@@ -120,14 +152,13 @@ Qué significa `status`:
 | --- | --- |
 | `none` | Nada que avisar. |
 | `posted` | El webhook ha respondido bien. |
-| `dry_run` | Había una señal, pero faltan los secretos. Aun así cuenta como aviso del día, igual que en el ordenador. |
+| `dry_run` | Había una señal, pero faltan los secretos. Aun así cuenta como aviso del día y de la hora. |
 | `post_failed` | Se intentó enviar y falló. No cuenta: si la señal sigue, lo reintenta en el siguiente ciclo. |
-| `quiet_hours_logged` | Es de noche (00:00–08:00, Madrid). Queda anotado y no se envía. |
-| `daily_cap_logged` | Ya se han enviado los 8 avisos de hoy. |
+| `quiet_hours_logged` | Es de noche. Queda anotado y no se envía. |
+| `daily_cap_logged` | Ya se han enviado los 6 avisos de hoy. |
+| `hourly_cap_logged` | Ya se han enviado los 2 avisos de esta hora. |
 
-Si hay muchos activos moviéndose a la vez, solo pide velas de los **25** más movidos.
-
-La primera hora, todavía no hay un precio de hace una hora guardado. Mientras tanto elige candidatos por el movimiento de 24 horas. A partir de la segunda hora también compara con el precio de hace una hora.
+Si hay muchos activos moviéndose a la vez, solo pide velas de los **25** más movidos (vela de 1 hora y vela de 15 minutos). Para no perderse un salto de 15 minutos, entra como candidato quien se haya movido un **3%** desde la pasada anterior (unos 15 minutos), quien lleve un **2%** frente a hace una hora, o un **8%** en 24 horas. En la primera ejecución todavía no hay precios guardados, así que solo entra el movimiento de 24 horas; a partir de la segunda ya compara con el cuarto de hora anterior.
 
 ## Dónde se guarda la memoria
 
@@ -137,8 +168,10 @@ Se guarda en una rama aparte, **`detector-state`**. Esa rama solo tiene el últi
 
 En esa rama están:
 
-- `data/detector_state.json` — la memoria
+- `data/detector_state.json` — la memoria (precios, interés abierto, pausas y cupos)
 - `signals/explosion_alerts.jsonl` — un historial corto de avisos (como mucho unos cientos de líneas)
+- `data/scans/latest.md` — la tabla del último ciclo, igual que el resumen de Actions
+- `data/scans/AAAA-MM-DD.csv` — una fila por candidato y por ciclo, para estudiarlo en una hoja de cálculo. Solo se guardan los últimos **14 días**
 - `LEEME.txt` — una nota que dice que no hay que editar esos ficheros a mano
 
 No hace falta abrirla para el día a día. El registro de Actions basta. La rama es pública, como el resto del repositorio: tiene movimientos de mercado, no la URL ni la clave del webhook.
