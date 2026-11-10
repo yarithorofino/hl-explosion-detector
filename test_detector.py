@@ -766,8 +766,27 @@ class DetectorTests(unittest.TestCase):
         mid = (long_w["entry_low"] + long_w["entry_high"]) / 2
         calls = []
         detector.send = lambda payload, cfg: calls.append(payload) or "posted"
+
+        def candles_for_level(coin, interval, n_bars):
+            if interval == "15m":
+                t0 = NOW * 1000
+                return [{
+                    "t": t0 - (8 - i) * 900_000, "o": mid, "h": mid + 0.1,
+                    "l": mid - 0.1, "c": mid, "v": 1,
+                } for i in range(8)]
+            # One confirmed high at 125, which is also the 24h high. Nothing closer.
+            t0 = NOW * 1000 - 25 * 3_600_000
+            out = []
+            for i in range(26):
+                out.append({
+                    "t": t0 + i * 3_600_000, "o": 99, "h": 125.0 if i == 8 else 100.0,
+                    "l": 98, "c": 99, "v": 1,
+                })
+            return out
+
         self.assertTrue(self.cycle(
             [asset("INIT", mark=mid, pct_24h=0.2, day=2_000_000)],
+            candle_fn=candles_for_level,
             state={"marks": [], "last_fire": {}, "wakes": {}, "wakes_hour": {}, "watches": [long_w]},
         ))
         self.assertEqual(len(calls), 1)
@@ -779,6 +798,7 @@ class DetectorTests(unittest.TestCase):
         for key in ("entry", "sl", "tp1", "tp2", "rr"):
             self.assertIn(key, item)
         self.assertGreaterEqual(item["rr"], 2)
+        self.assertEqual(item["tp1"], 125.0)
 
         short_w = watchmod.build_watch("MEME", "main", "short", "1h_legacy", [
             {"o": 110, "h": 111, "l": 104, "c": 105, "v": 1},

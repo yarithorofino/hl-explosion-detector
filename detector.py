@@ -90,6 +90,7 @@ _CFG_KEYS = (
     "mode_absorption", "mode_vol_accel", "mode_squeeze", "mode_oi", "mode_cvd", "mode_funding",
     "short_min_day_ntl_usd", "short_hip3_min_oi_usd", "short_funding_min_pct",
     "shadow_keep_days",
+    "swing_wing", "knife_drop_pct", "knife_min_minutes", "knife_max_minutes",
 )
 
 # Early components and the config flag that says shadow or live.
@@ -1224,6 +1225,8 @@ def run_cycle(cfg):
 
     rows = []
     shadow_rows = []
+    hourly = {}
+    fifteens = {}
     pending = []  # alerts that passed a trigger and are not in cooldown
     impulse = {}  # coin -> 1h candles used to build the watch
     extremes = {}
@@ -1269,6 +1272,7 @@ def run_cycle(cfg):
                 int(cfg["absorption_median_bars"]) + int(cfg["absorption_repeat_bars"]) + 2,
             )
             cs_h = candles(a["coin"], "1h", need_1h)
+            hourly[a["coin"]] = cs_h
             view_1h = series_view(cs_h, "1h", cfg, floor)
             n_series += 1
         except Exception as e:
@@ -1276,6 +1280,7 @@ def run_cycle(cfg):
         if a["coin"] not in hour_only:
             try:
                 cs_m = candles(a["coin"], "15m", max(bars_15, int(cfg["vol_accel_avg_bars"]) + 2))
+                fifteens[a["coin"]] = cs_m
                 view_15 = series_view(cs_m, "15m", cfg, floor)
                 n_series += 1
                 ext = _bar_extreme(cs_m)
@@ -1459,7 +1464,37 @@ def run_cycle(cfg):
                     w["short_block"] = why
             else:
                 w.pop("short_block", None)
-                entry_payloads.append(_entry_payload(w, nowm))
+                mark_now = fresh_m.get(w["coin"])
+                if w["coin"] not in hourly:
+                    try:
+                        hourly[w["coin"]] = candles(
+                            w["coin"], "1h",
+                            max(int(cfg["avg_window_hours"]) + int(cfg["swing_wing"]) * 2 + 2, 26),
+                        )
+                        n_series += 1
+                    except Exception as exc:
+                        log(f"velas 1h {w['coin']}: {exc}")
+                if w["coin"] not in fifteens:
+                    try:
+                        fifteens[w["coin"]] = candles(w["coin"], "15m", 8)
+                        n_series += 1
+                    except Exception as exc:
+                        log(f"velas 15m {w['coin']}: {exc}")
+                ok_level, why = watchmod.qualify_entry(
+                    w, mark_now if mark_now is not None else w.get("fill"),
+                    hourly.get(w["coin"]), fifteens.get(w["coin"]),
+                    int(now * 1000), cfg,
+                )
+                if not ok_level:
+                    w["status"] = "open"
+                    for key in ("fill", "rr", "entry_sent_at"):
+                        w.pop(key, None)
+                    if w.get("level_block") != why:
+                        log(f"entrada no enviada {w['coin']}: {why}")
+                        w["level_block"] = why
+                else:
+                    w.pop("level_block", None)
+                    entry_payloads.append(_entry_payload(w, nowm))
         if event == "quiet" and not w.get("quiet_noted"):
             log(f"entrada en silencio {w['coin']} {w['side']}")
             w["quiet_noted"] = True

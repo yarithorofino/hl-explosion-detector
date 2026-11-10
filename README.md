@@ -4,7 +4,7 @@ Este programa mira los perpetuos de Hyperliquid (el mercado principal y los de H
 
 Antes corría en un ordenador que se duerme. Ahora lo ejecuta GitHub cada 15 minutos, también con el ordenador apagado.
 
-Lo que llama al webhook, y por tanto despierta el análisis de pago, es `entry_ready`: el precio ha llegado a la zona, con entrada, stop, dos objetivos y un cobro de al menos el doble del riesgo. Lleva `side` (`long` o `short`) y `side_label` (`largo` o `corto`), más el disparo que abrió la vigilancia.
+Lo que llama al webhook, y por tanto despierta el análisis de pago, es `entry_ready`: el precio ha llegado a la zona, con entrada, stop, dos objetivos y un cobro de al menos el doble del riesgo. Lleva `side` (`long` o `short`) y `side_label` (`largo` o `corto`), más el disparo que abrió la vigilancia. El primer objetivo es el primer máximo o mínimo real que hay por delante (un giro de las velas de 1 hora, o el máximo o mínimo de las últimas 24 horas, el que esté más cerca). El segundo objetivo es el siguiente. El cobro se calcula con el precio de ahora contra ese primer nivel; si no llega a 2, no se envía. Un largo tampoco se envía si la última hora ya cerrada tiene una mecha superior de más de la mitad de su rango en la entrada o por encima, ni si el precio ha caído más de un 15% en los últimos 30–60 minutos y no ha hecho una base.
 
 La fase 1 (las reglas de abajo) se anota y abre esa vigilancia, y **no llama al webhook**. Da igual que el libro sea operable: el aviso de hoy llegaba con el movimiento ya hecho. `phase1_webhook` vale `"watch"`. `"tradable"` vuelve a llamar solo si el volumen de 24 horas pasa de 1 millón. `"live"` restaura el aviso de antes para todos los nombres.
 
