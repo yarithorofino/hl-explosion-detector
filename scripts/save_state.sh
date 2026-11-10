@@ -63,6 +63,11 @@ if scans.exists():
     for child in scans.iterdir():
         if child.is_file():
             abort_if_secret(child.read_text(encoding="utf-8", errors="replace"), f"el scan {child.name}")
+shadow = Path("data/shadow")
+if shadow.exists():
+    for child in shadow.iterdir():
+        if child.is_file():
+            abort_if_secret(child.read_text(encoding="utf-8", errors="replace"), f"la sombra {child.name}")
 print(f"estado valido: marcas={len(d['marks'])} cooldowns={len(d['last_fire'])} dias_wake={len(d['wakes'])}")
 PY
 
@@ -115,6 +120,21 @@ if [[ -d data/scans ]]; then
   done < <(find data/scans -type f | sort)
 fi
 
+if [[ -d data/shadow ]]; then
+  while IFS= read -r f; do
+    base=$(basename "$f")
+    case "$base" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv)
+        add_blob "data/shadow/$base" "$f"
+        ;;
+      *)
+        echo "Fichero de sombra no permitido: $f" >&2
+        exit 1
+        ;;
+    esac
+  done < <(find data/shadow -type f | sort)
+fi
+
 cat > "$LEEME" <<'EOF'
 Esta rama la reescribe sola GitHub Actions (workflow "Detector de explosiones").
 No edites estos ficheros: el siguiente ciclo los sustituye.
@@ -127,6 +147,8 @@ No edites estos ficheros: el siguiente ciclo los sustituye.
   Tabla del último ciclo, la misma que el resumen de Actions.
 - data/scans/AAAA-MM-DD.csv
   Un candidato por fila. Solo se conservan los últimos 14 días.
+- data/shadow/AAAA-MM-DD.csv
+  Señales tempranas calculadas y no enviadas. Sirven para el repaso del 24 nov.
 
 No hay secretos aquí. La URL del webhook no se guarda en el repositorio.
 EOF
@@ -136,6 +158,7 @@ while IFS= read -r f; do
   case "$f" in
     LEEME.txt|data/detector_state.json|signals/explosion_alerts.jsonl|data/scans/latest.md) ;;
     data/scans/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
+    data/shadow/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
     *)
       echo "Ruta inesperada en el estado: $f" >&2
       exit 1

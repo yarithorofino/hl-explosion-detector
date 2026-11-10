@@ -4,22 +4,33 @@ Este programa mira los perpetuos de Hyperliquid (el mercado principal y los de H
 
 Antes corría en un ordenador que se duerme. Ahora lo ejecuta GitHub cada 15 minutos, también con el ordenador apagado.
 
+Lo que llama al webhook, y por tanto despierta el análisis de pago, es `entry_ready`: el precio ha llegado a la zona, con entrada, stop, dos objetivos y un cobro de al menos el doble del riesgo. Lleva `side` (`long` o `short`) y `side_label` (`largo` o `corto`), más el disparo que abrió la vigilancia.
+
+La fase 1 (las reglas de abajo) se anota y abre esa vigilancia, y **no llama al webhook**. Da igual que el libro sea operable: el aviso de hoy llegaba con el movimiento ya hecho. `phase1_webhook` vale `"watch"`. `"tradable"` vuelve a llamar solo si el volumen de 24 horas pasa de 1 millón. `"live"` restaura el aviso de antes para todos los nombres.
+
+Las señales tempranas (absorción, volumen relativo, compresión, interés abierto, delta y funding) se calculan y se apuntan en `data/shadow/`, y salen en el resumen de la pasada, pero **no llaman al webhook**. Cada una tiene su interruptor en la configuración (`shadow` o `live`). En `live`, y solo si la puntuación llega al mínimo, esa señal sí puede llamar. Una vigilancia de absorción, aunque esté en sombra, sí puede acabar en `entry_ready`.
+
+Un corto solo se envía si el volumen de 24 horas es de al menos **5 millones**, y en HIP-3 además el interés abierto es de al menos **1 millón**, y el funding no es de −0,01%/h o más negativo (ahí el corto ya está pagando). De **00:00 a 08:00** (Madrid) no hay ninguna llamada. La vigilancia y la sombra siguen de noche. Si a las 8 la zona sigue siendo válida, `entry_ready` sale entonces.
+
+El estudio de la semana del 10 nov está en `reports/replay_2026-11-10.md`. Para el repaso del 24 nov: `python3 shadow_report.py --fetch`.
+
 Avisa igual si el precio sube o si baja. Salta si se cumple **cualquiera** de estas reglas (el aviso dice cuáles):
 
 - **Hora contra su propio rango (1h_atr).** El movimiento de la última hora es al menos **3 veces** el ATR de 14 velas de 1 hora (el rango típico, en %) y, además, no baja de un suelo: **3%** si es un grande y **5%** en el resto. El volumen de esa vela es al menos **5 veces** la media de las 24 horas anteriores y al menos **100.000 dólares**.
 - **Hora fija (1h_legacy).** El movimiento de la última hora es de al menos **8%**, con el mismo volumen (5 veces la media y 100.000 dólares). Sirve cuando la moneda ya iba muy movida y el ATR pide un salto enorme.
 - **Quince minutos (15m_early).** El movimiento de la vela de 15 minutos es de al menos **4%**, con un volumen de al menos **5 veces** la media de las velas de 15 minutos de las 24 horas anteriores y al menos **25.000 dólares**.
 - **Escalera de 3 horas (3h_escalera).** La suma del recorrido de las 3 últimas velas de 1 hora (de la apertura de la primera al cierre de la última) es de al menos **10%**. Al menos 2 de esas 3 cierran en esa dirección y marcan máximos más altos (o mínimos más bajos). No pide múltiplo de volumen. El aviso lleva `label: "escalera"`. `tradable` sigue la regla del millón. De noche se calla igual que el resto, salvo que en la configuración se ponga `escalera_ignore_quiet_hours` a true.
+- **Absorción (absorption), en sombra.** Solo si el volumen de 24 horas es de al menos **1 millón**. La vela de 1 hora mueve al menos **8 veces** la mediana y **8 veces** la media de las 48 horas anteriores, el cierre a cierre se queda por debajo del **1%** y el rango de la vela por debajo del **2%**. Una sola vela no abre vigilancia. Si se repite dentro de esas 48 horas, abre una vigilancia de urgencia baja (no llama al webhook) y espera a que el precio salga del rango. La dirección sale de dónde cierra la vela, o del desequilibrio de agresores cuando esa muestra existe.
 
 Grandes, con suelo del 3%: BTC, ETH y SOL (el nombre exacto del mercado) y, en el mercado principal, cualquier perp cuyo volumen de 24 horas sea de **100 millones de dólares** o más. Un mercado HIP-3 no se vuelve grande solo por volumen. La lista y el umbral están en `data/detector_config.json`.
 
 Para poder avisar hace falta liquidez: volumen de 24 horas de al menos **300.000 dólares**. Si no es el mercado principal (HIP-3), además el interés abierto tiene que ser de al menos **500.000 dólares**.
 
-Si el volumen de 24 horas es de menos de **1 millón**, el aviso sale igual, pero marcado `tradable: false` y `label: "vigilancia, no operable"`. A partir de 1 millón va `tradable: true` y `label: "operable"`.
+Si el volumen de 24 horas es de menos de **1 millón**, la fase 1 va marcada `tradable: false` y `label: "vigilancia, no operable"`. A partir de 1 millón va `tradable: true` y `label: "operable"`. En los dos casos se anota y abre vigilancia, y no llama al webhook.
 
 Si la mecha de rechazo de la vela que dispara (la de arriba cuando sube, la de abajo cuando baja) ocupa más del **50%** del rango, el aviso lleva `exhaustion_flag: true` y `exhaustion_label: "posible agotamiento"`.
 
-Si en el mismo cuarto de hora saltan varios, van todos en **un solo aviso**. El mismo activo no se repite hasta pasadas **4 horas**. Como máximo hay **10 avisos al día** y **2 por hora** (cada POST cuenta como uno, aunque lleve varios activos). La escalera cuenta igual para esos cupos. Tiene su propia pausa de 4 horas, así un aviso de escalera no impide, una hora después, el aviso del 8% o el de 15 minutos. De **00:00 a 08:00** (hora de Madrid) anota la señal pero no llama al webhook; a las 8 ya puede avisar. La prueba manual no gasta esos cupos.
+Si en el mismo cuarto de hora saltan varios, van todos en la misma anotación. El mismo activo no abre otra vigilancia hasta pasadas **4 horas**. La escalera tiene su propia pausa de 4 horas, así una escalera no impide, una hora después, el aviso del 8% o el de 15 minutos. Esos cupos de **10 al día** y **2 por hora** solo cuentan cuando la fase 1 vuelve a llamar al webhook (`tradable` o `live`). `entry_ready` no los gasta. De **00:00 a 08:00** (hora de Madrid) no hay ninguna llamada; a las 8, `entry_ready` puede salir si la zona sigue válida. La prueba manual no gasta esos cupos.
 
 ## Qué tienes que hacer tú
 
@@ -156,6 +167,7 @@ Qué significa `status`:
 | `posted` | El webhook ha respondido bien. |
 | `dry_run` | Había una señal, pero faltan los secretos. Aun así cuenta como aviso del día y de la hora. |
 | `post_failed` | Se intentó enviar y falló. No cuenta: si la señal sigue, lo reintenta en el siguiente ciclo. |
+| `watch_only` | La fase 1 quedó anotada y abrió vigilancia. No se ha llamado al webhook. |
 | `quiet_hours_logged` | Es de noche. Queda anotado y no se envía. |
 | `daily_cap_logged` | Ya se han enviado los 10 avisos de hoy. |
 | `hourly_cap_logged` | Ya se han enviado los 2 avisos de esta hora. |

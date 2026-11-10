@@ -42,6 +42,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import early_signals
+import watch as watchmod
 from perps_all import post, scan
 
 ROOT = Path(__file__).resolve().parent
@@ -67,7 +69,39 @@ _CFG_KEYS = (
     "prefilter_3h_min_age_sec", "prefilter_3h_max_age_sec", "prefilter_3h_target_sec",
     "max_candle_calls", "cooldown_hours", "max_alerts_per_day", "max_alerts_per_hour",
     "quiet_start_hour", "quiet_end_hour", "scan_keep_days",
+    "watch_expiry_hours", "watch_rr_min", "watch_fib_shallow", "watch_fib_deep",
+    "watch_impulse_bars", "entry_ready_respect_quiet_hours",
+    "early_min_day_ntl_usd", "early_score_min", "early_extra_names",
+    "vol_accel_mult", "vol_accel_max_price_pct", "vol_accel_avg_bars",
+    "vol_accel_min_notional_15m", "vol_accel_min_notional_1h",
+    "oi_buildup_pct", "oi_buildup_max_price_pct",
+    "squeeze_bb_period", "squeeze_bb_mult", "squeeze_kc_mult",
+    "squeeze_min_bars_inside", "squeeze_vol_mult",
+    "cvd_imbalance_min", "cvd_max_price_pct", "cvd_min_notional_usd",
+    "cvd_window_hours", "cvd_max_coins", "funding_shift_abs",
+    "early_weight_vol", "early_weight_squeeze", "early_weight_oi",
+    "early_weight_cvd", "early_weight_funding", "early_weight_divergence",
+    "absorption_median_bars", "absorption_repeat_bars", "absorption_rvol_min",
+    "absorption_mean_mult",
+    "absorption_max_return_pct", "absorption_max_range_pct", "absorption_min_repeats",
+    "early_weight_absorption", "early_weight_absorption_repeat",
+    "early_rotate_names",
+    "phase1_webhook",
+    "mode_absorption", "mode_vol_accel", "mode_squeeze", "mode_oi", "mode_cvd", "mode_funding",
+    "short_min_day_ntl_usd", "short_hip3_min_oi_usd", "short_funding_min_pct",
+    "shadow_keep_days",
 )
+
+# Early components and the config flag that says shadow or live.
+EARLY_MODES = {
+    "absorption": "mode_absorption",
+    "vol_accel": "mode_vol_accel",
+    "squeeze_breakout": "mode_squeeze",
+    "oi_buildup": "mode_oi",
+    "cvd_absorption": "mode_cvd",
+    "funding_shift": "mode_funding",
+}
+PHASE1_TRIGGERS = {"1h_atr", "1h_legacy", "15m_early", "3h_escalera"}
 _SCAN_HEADERS = (
     "dex", "coin", "15m %", "1h %", "3h %", "24h %", "mult 1h", "vol 24h", "OI",
     "funding %", "ATR %", "suelo", "disparo", "resultado",
@@ -153,12 +187,18 @@ def load_cfg():
         raise RuntimeError("config sin " + ", ".join(missing))
     if not isinstance(cfg["major_coins"], list) or not cfg["major_coins"]:
         raise RuntimeError("config major_coins debe ser una lista con nombres")
+    if cfg["phase1_webhook"] not in ("watch", "tradable", "live"):
+        raise RuntimeError("phase1_webhook debe ser watch, tradable o live")
+    for key in EARLY_MODES.values():
+        if cfg[key] not in ("shadow", "live"):
+            raise RuntimeError(f"{key} debe ser shadow o live")
     return cfg
 
 
 def load_state():
     if not STATE.exists() or STATE.stat().st_size == 0:
-        return {"marks": [], "last_fire": {}, "last_fire_escalera": {}, "wakes": {}, "wakes_hour": {}}
+        return {"marks": [], "last_fire": {}, "last_fire_escalera": {}, "wakes": {}, "wakes_hour": {},
+                "watches": [], "cvd": {}, "early_cursor": 0, "last_shadow": {}}
     try:
         st = json.loads(STATE.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
@@ -181,6 +221,15 @@ def load_state():
             clean_oi = {str(k): v for k, v in oi.items() if _finite_num(v)}
             if clean_oi:
                 item["oi"] = clean_oi
+        fund = s.get("funding")
+        if isinstance(fund, dict):
+            clean_f = {}
+            for k, v in fund.items():
+                n = _num(v)
+                if n is not None:
+                    clean_f[str(k)] = n
+            if clean_f:
+                item["funding"] = clean_f
         marks.append(item)
     last_fire = {}
     for k, v in (st.get("last_fire") or {}).items():
@@ -204,9 +253,34 @@ def load_state():
         if v != v or v in (float("inf"), float("-inf")):
             continue
         last_fire_escalera[str(k)] = float(v)
+    watches = []
+    for w in st.get("watches") or []:
+        if isinstance(w, dict) and w.get("coin") and w.get("side") in ("long", "short") and w.get("status"):
+            watches.append(w)
+    cvd = {}
+    raw_cvd = st.get("cvd") if isinstance(st.get("cvd"), dict) else {}
+    for coin, book in raw_cvd.items():
+        if not isinstance(book, dict):
+            continue
+        trades = []
+        for t in book.get("trades") or []:
+            if isinstance(t, dict) and t.get("side") in ("A", "B") and _finite_num(t.get("px")) and _finite_num(t.get("sz")):
+                trades.append(t)
+        cvd[str(coin)] = {"trades": trades[-400:]}
+    cursor = st.get("early_cursor")
+    if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
+        cursor = 0
+    last_shadow = {}
+    for k, v in (st.get("last_shadow") or {}).items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        if v != v or v in (float("inf"), float("-inf")):
+            continue
+        last_shadow[str(k)] = float(v)
     return {
         "marks": marks, "last_fire": last_fire, "last_fire_escalera": last_fire_escalera,
-        "wakes": wakes, "wakes_hour": wakes_hour,
+        "wakes": wakes, "wakes_hour": wakes_hour, "watches": watches, "cvd": cvd,
+        "early_cursor": cursor, "last_shadow": last_shadow,
     }
 
 
@@ -583,6 +657,85 @@ def _scans_dir():
     return STATE.parent / "scans"
 
 
+def _shadow_dir():
+    return STATE.parent / "shadow"
+
+
+def _take_shadow_rows(st, rows, now, cfg):
+    """One row per coin and trigger set inside the cooldown. Quiet hours are kept."""
+    fresh = []
+    window = float(cfg["cooldown_hours"]) * H
+    seen = st.setdefault("last_shadow", {})
+    for row in rows:
+        key = f"{row['coin']}|{row['trigger']}"
+        prev = seen.get(key)
+        if prev is not None and now - prev < window:
+            continue
+        seen[key] = now
+        fresh.append(row)
+    return fresh
+
+
+def _shadow_markdown(rows):
+    lines = [
+        "### Sombra (calculado, sin webhook)",
+        "",
+    ]
+    if not rows:
+        lines.append("- Sin señales tempranas nuevas en esta pasada.")
+        return "\n".join(lines)
+    lines.append("| coin | lado | disparo | puntos | precio |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for row in rows:
+        lines.append(
+            "| {coin} | {side} | {trigger} | {score} | {price} |".format(
+                coin=_cell(row["coin"]),
+                side=_cell(row["side"] or "—"),
+                trigger=_cell(row["trigger"]),
+                score=row["score"],
+                price=_fmt(row["price"], 6),
+            )
+        )
+    return "\n".join(lines)
+
+
+def write_shadow(when, day, rows, keep_days):
+    if not rows:
+        return
+    directory = _shadow_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{day}.csv"
+    previous = []
+    if path.exists():
+        previous = path.read_text(encoding="utf-8").splitlines()
+    header = ["ts_madrid", "dex", "coin", "side", "trigger", "score", "components", "price",
+              "day_ntl", "oi_usd", "funding_pct"]
+    import io
+    sio = io.StringIO()
+    writer = csv.writer(sio, lineterminator="\n")
+    writer.writerow(header)
+    if previous:
+        start = 1 if previous[0].startswith("ts_madrid") else 0
+        for line in previous[start:]:
+            if line.strip():
+                sio.write(line + "\n")
+    for row in rows:
+        writer.writerow([
+            when, row["dex"], row["coin"], row["side"], row["trigger"], row["score"],
+            row["components"], _csv_cell(row["price"]), _csv_cell(row["day_ntl"]),
+            _csv_cell(row["oi_usd"]), _csv_cell(row["funding_pct"]),
+        ])
+    atomic_write(path, sio.getvalue())
+    cutoff = datetime.strptime(day, "%Y-%m-%d").date() - timedelta(days=int(keep_days) - 1)
+    for old in directory.glob("*.csv"):
+        try:
+            stamp = datetime.strptime(old.stem, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if stamp < cutoff:
+            old.unlink()
+
+
 def write_scans(when, day, markdown, rows, keep_days):
     directory = _scans_dir()
     directory.mkdir(parents=True, exist_ok=True)
@@ -816,6 +969,193 @@ def _mark_ready(summary_line):
     atomic_write(STATE.parent / "state_ready", "ok\n")
 
 
+def _side_from_moves(pct_3h, pct_1h, pct_15m, fallback=None):
+    ranked = [(abs(v), v) for v in (pct_3h, pct_1h, pct_15m) if isinstance(v, (int, float)) and v]
+    if not ranked:
+        return fallback
+    value = max(ranked)[1]
+    return "long" if value > 0 else "short"
+
+
+def _bar_extreme(cs):
+    if not cs:
+        return None
+    last = cs[-1]
+    h, l, c = _num(last.get("h")), _num(last.get("l")), _num(last.get("c"))
+    if h is None or l is None or c is None:
+        return None
+    return h, l, c
+
+
+def evaluate_early(cs_1h, cs_15m, asset, old_snap, cvd_stats, cfg, btc_up=None, fear_greed=None):
+    """Score one liquid name. Returns the confluence dict (hit may be false)."""
+    if (asset.get("dayNtlVlm") or 0) < cfg["early_min_day_ntl_usd"]:
+        return {"hit": False, "score": 0, "triggers": [], "side": None}
+    parts = {}
+    side = None
+    if cs_15m and len(cs_15m) > int(cfg["vol_accel_avg_bars"]):
+        got = early_signals.vol_accel(cs_15m, len(cs_15m) - 1, cfg, cfg["vol_accel_min_notional_15m"])
+        if got.get("hit"):
+            parts["vol_accel"] = True
+    if not parts.get("vol_accel") and cs_1h and len(cs_1h) > int(cfg["vol_accel_avg_bars"]):
+        got = early_signals.vol_accel(cs_1h, len(cs_1h) - 1, cfg, cfg["vol_accel_min_notional_1h"])
+        if got.get("hit"):
+            parts["vol_accel"] = True
+    if cs_1h and len(cs_1h) > int(cfg["squeeze_bb_period"]) + int(cfg["squeeze_min_bars_inside"]):
+        sq = early_signals.squeeze_breakout(cs_1h, len(cs_1h) - 1, cfg)
+        if sq and sq.get("hit"):
+            parts["squeeze"] = True
+            side = sq.get("side")
+    px_now = _num(asset.get("mark"))
+    px_then = None
+    oi_then = None
+    fund_then = None
+    if old_snap and px_now:
+        px_then = _num((old_snap.get("m") or {}).get(asset["coin"]))
+        oi_then = _num((old_snap.get("oi") or {}).get(asset["coin"]))
+        fund_then = _num((old_snap.get("funding") or {}).get(asset["coin"]))
+    price_pct = ((px_now / px_then - 1) * 100) if px_now and px_then else None
+    oi = early_signals.oi_buildup(asset.get("oi_usd"), oi_then, px_now, px_then, cfg)
+    if oi.get("hit"):
+        parts["oi_buildup"] = True
+    cvd = early_signals.cvd_absorption(cvd_stats, price_pct, cfg)
+    if cvd.get("hit"):
+        parts["cvd"] = True
+        side = side or cvd.get("side")
+    absorbed = {"hit": False}
+    if cs_1h and len(cs_1h) > int(cfg["absorption_median_bars"]):
+        # The live hour is still filling. The spike we care about is usually
+        # the hour that just closed, so look at both, the same way the
+        # explosion rules do.
+        delta_side = cvd.get("side") if cvd.get("hit") else None
+        candidates = [len(cs_1h) - 1]
+        if len(cs_1h) >= 2:
+            candidates.insert(0, len(cs_1h) - 2)
+        for idx in candidates:
+            got = early_signals.absorption(cs_1h, idx, cfg, delta_side=delta_side)
+            if not got.get("hit"):
+                continue
+            rank = (1 if got.get("repeated") else 0, got.get("rvol") or 0)
+            best = (1 if absorbed.get("repeated") else 0, absorbed.get("rvol") or 0)
+            if not absorbed.get("hit") or rank > best:
+                absorbed = got
+        if absorbed.get("hit"):
+            parts["absorption"] = True
+            if absorbed.get("repeated"):
+                parts["absorption_repeat"] = True
+            # A breakout that already chose a side keeps it. Otherwise the
+            # close location (or the taker imbalance) supplies the side.
+            if side is None:
+                side = absorbed.get("side")
+    fund = early_signals.funding_shift(_funding_pct(asset), fund_then, cfg)
+    if fund.get("hit"):
+        parts["funding"] = True
+    if side and early_signals.cvd_divergence(cvd_stats, price_pct, cfg):
+        # Only count divergence when price itself moved against the flow.
+        if price_pct is not None and abs(price_pct) >= float(cfg["cvd_max_price_pct"]):
+            parts["divergence"] = True
+    scored = early_signals.confluence(parts, cfg, side, btc_up, fear_greed)
+    scored["absorption"] = absorbed if absorbed.get("hit") else None
+    return scored
+
+
+def _ingest_cvd(st, coins, now, cfg):
+    """Fold the latest prints into a 2h window. recentTrades is only the last few fills."""
+    window_ms = float(cfg["cvd_window_hours"]) * H * 1000
+    books = st.setdefault("cvd", {})
+    stats = {}
+    for coin in coins[: int(cfg["cvd_max_coins"])]:
+        try:
+            trades = post({"type": "recentTrades", "coin": coin})
+        except Exception as exc:
+            log(f"cvd {coin}: {exc}")
+            continue
+        if not isinstance(trades, list):
+            continue
+        book = books.setdefault(coin, {"trades": []})
+        seen = {t.get("tid") for t in book["trades"]}
+        for t in trades:
+            tid = t.get("tid")
+            px, sz = _num(t.get("px")), _num(t.get("sz"))
+            if tid in seen or px is None or sz is None or t.get("side") not in ("A", "B"):
+                continue
+            book["trades"].append({
+                "tid": tid, "time": t.get("time") or int(now * 1000),
+                "side": t["side"], "px": px, "sz": sz,
+            })
+            seen.add(tid)
+        cutoff = now * 1000 - window_ms
+        book["trades"] = [t for t in book["trades"] if (t.get("time") or 0) >= cutoff][-400:]
+        stats[coin] = early_signals.cvd_from_trades(book["trades"])
+    return stats
+
+
+def _public_alert(alert):
+    return {k: v for k, v in alert.items() if not k.startswith("_")}
+
+
+def _trigger_set(alert):
+    return set((alert.get("trigger") or "").split("+")) - {""}
+
+
+def _wants_webhook(alert, cfg):
+    """Phase-1 posts only when the config says so. Shadow early signals never post."""
+    names = _trigger_set(alert)
+    phase1 = names & PHASE1_TRIGGERS
+    early = names & set(EARLY_MODES)
+    post = False
+    mode = cfg["phase1_webhook"]
+    if phase1 and mode == "live":
+        post = True
+    elif phase1 and mode == "tradable" and alert.get("tradable"):
+        post = True
+    if any(cfg[EARLY_MODES[name]] == "live" for name in early):
+        post = True
+    return post
+
+
+def short_entry_allowed(watch, cfg):
+    """Shorts need a deep book, and funding that is not already paying the shorts."""
+    if watch.get("side") != "short":
+        return True, ""
+    day = _num(watch.get("day_ntl"))
+    if day is None or day < float(cfg["short_min_day_ntl_usd"]):
+        return False, "volumen 24h por debajo de 5M$"
+    dex = watch.get("dex") or "main"
+    if dex != "main":
+        oi = _num(watch.get("oi_usd"))
+        if oi is None or oi < float(cfg["short_hip3_min_oi_usd"]):
+            return False, "OI de HIP-3 por debajo de 1M$"
+    funding = _num(watch.get("funding_pct"))
+    floor = float(cfg["short_funding_min_pct"])
+    if funding is not None and funding <= floor:
+        return False, f"funding {funding} <= {floor}%/h"
+    return True, ""
+
+
+def _entry_payload(watch, nowm):
+    side = watch["side"]
+    payload = {
+        "type": "entry_ready",
+        "coin": watch["coin"],
+        "dex": watch.get("dex"),
+        "side": side,
+        "side_label": "largo" if side == "long" else "corto",
+        "entry": round(watch["fill"], 8),
+        "sl": watch["sl"],
+        "tp1": watch["tp1"],
+        "tp2": watch["tp2"],
+        "rr": round(watch["rr"], 2),
+        "trigger": watch.get("trigger"),
+        "detected_at_madrid": nowm.strftime("%Y-%m-%d %H:%M"),
+    }
+    if watch.get("urgency"):
+        payload["urgency"] = watch["urgency"]
+    if watch.get("kind"):
+        payload["kind"] = watch["kind"]
+    return payload
+
+
 def run_cycle(cfg):
     """One live cycle. Returns True only after a good scan has been saved locally."""
     try:
@@ -865,13 +1205,16 @@ def run_cycle(cfg):
             continue
         score = max(abs(p15 or 0), abs(p1 or 0), abs(p3 or 0), abs(a.get("pct_24h") or 0))
         ranked.append((score, a))
-    fresh_m, fresh_oi = {}, {}
+    fresh_m, fresh_oi, fresh_f = {}, {}, {}
     for a in assets:
         if a.get("mark") and _finite_num(a["mark"]):
             fresh_m[a["coin"]] = a["mark"]
         if a.get("oi_usd") and _finite_num(a["oi_usd"]):
             fresh_oi[a["coin"]] = a["oi_usd"]
-    st["marks"].append({"ts": now, "m": fresh_m, "oi": fresh_oi})
+        fp = _funding_pct(a)
+        if fp is not None:
+            fresh_f[a["coin"]] = fp
+    st["marks"].append({"ts": now, "m": fresh_m, "oi": fresh_oi, "funding": fresh_f})
     if len(st["marks"]) > 200:
         st["marks"] = st["marks"][-200:]
     ranked.sort(key=lambda x: x[0], reverse=True)
@@ -880,22 +1223,83 @@ def run_cycle(cfg):
     bars_15 = int(cfg["avg_window_15m"]) + 8
 
     rows = []
-    pending = []  # (asset, alert, row index) that passed the trigger and are not in cooldown
+    shadow_rows = []
+    pending = []  # alerts that passed a trigger and are not in cooldown
+    impulse = {}  # coin -> 1h candles used to build the watch
+    extremes = {}
     n_series = 0
-    for _, a in top:
+    liquid = [a for a in assets if (a.get("dayNtlVlm") or 0) >= cfg["early_min_day_ntl_usd"]]
+    liquid.sort(key=lambda a: a.get("dayNtlVlm") or 0, reverse=True)
+    seen_coins = {a["coin"] for _, a in top}
+    early_pool = list(top)
+    for a in liquid:
+        if a["coin"] in seen_coins:
+            continue
+        if len(early_pool) >= len(top) + int(cfg["early_extra_names"]):
+            break
+        early_pool.append((0, a))
+        seen_coins.add(a["coin"])
+    # Flat names never enter the price prefilter. Rotate through every book
+    # at or above 1M$ so a thin name like SOPH is still checked about once an hour.
+    hour_only = set()
+    rest = [a for a in liquid if a["coin"] not in seen_coins]
+    rest.sort(key=lambda a: a["coin"])
+    rotate_n = int(cfg["early_rotate_names"])
+    if rest and rotate_n > 0:
+        cursor = int(st.get("early_cursor") or 0) % len(rest)
+        for k in range(min(rotate_n, len(rest))):
+            picked = rest[(cursor + k) % len(rest)]
+            early_pool.append((0, picked))
+            hour_only.add(picked["coin"])
+        st["early_cursor"] = (cursor + min(rotate_n, len(rest))) % len(rest)
+    cvd_stats = {}
+    try:
+        cvd_coins = [a["coin"] for a in liquid[: int(cfg["cvd_max_coins"])]]
+        cvd_stats = _ingest_cvd(st, cvd_coins, now, cfg)
+    except Exception as exc:
+        log(f"cvd: {exc}")
+    for _, a in early_pool:
         floor = floor_for(a, cfg)
         view_1h = view_15 = None
+        cs_h = cs_m = None
         try:
-            view_1h = series_view(candles(a["coin"], "1h", bars_1h), "1h", cfg, floor)
+            need_1h = max(
+                bars_1h,
+                int(cfg["squeeze_bb_period"]) + int(cfg["squeeze_min_bars_inside"]) + 2,
+                int(cfg["absorption_median_bars"]) + int(cfg["absorption_repeat_bars"]) + 2,
+            )
+            cs_h = candles(a["coin"], "1h", need_1h)
+            view_1h = series_view(cs_h, "1h", cfg, floor)
             n_series += 1
         except Exception as e:
             log(f"velas 1h {a['coin']}: {e}")
-        try:
-            view_15 = series_view(candles(a["coin"], "15m", bars_15), "15m", cfg, floor)
-            n_series += 1
-        except Exception as e:
-            log(f"velas 15m {a['coin']}: {e}")
+        if a["coin"] not in hour_only:
+            try:
+                cs_m = candles(a["coin"], "15m", max(bars_15, int(cfg["vol_accel_avg_bars"]) + 2))
+                view_15 = series_view(cs_m, "15m", cfg, floor)
+                n_series += 1
+                ext = _bar_extreme(cs_m)
+                if ext:
+                    extremes[a["coin"]] = ext
+            except Exception as e:
+                log(f"velas 15m {a['coin']}: {e}")
+        early = evaluate_early(cs_h, cs_m, a, old, cvd_stats.get(a["coin"]), cfg)
+        if early.get("triggers"):
+            shadow_rows.append({
+                "dex": a.get("dex") or "",
+                "coin": a.get("coin") or "",
+                "side": early.get("side") or "",
+                "trigger": "+".join(early["triggers"]),
+                "score": early.get("score") or 0,
+                "components": "+".join(early["triggers"]),
+                "price": a.get("mark"),
+                "day_ntl": a.get("dayNtlVlm"),
+                "oi_usd": a.get("oi_usd"),
+                "funding_pct": _funding_pct(a),
+            })
         names = trigger_names(view_1h, view_15)
+        if early.get("hit"):
+            names = names + [n for n in early["triggers"] if n not in names]
         explosive = [n for n in names if n != "3h_escalera"]
         cool = cfg["cooldown_hours"] * H
         explosive_ready = bool(explosive) and now - st["last_fire"].get(a["coin"], 0) >= cool
@@ -910,6 +1314,9 @@ def run_cycle(cfg):
         else:
             result = "alerta"
         row = _row_from(a, floor, view_1h, view_15, result)
+        if names:
+            row["disparo"] = "+".join(names)
+            row["_triggers"] = "+".join(names)
         rows.append(row)
         if result == "alerta":
             enriched = dict(a)
@@ -917,8 +1324,26 @@ def run_cycle(cfg):
             enriched["_tradable_min"] = cfg["tradable_min_day_ntl_usd"]
             enriched["_early_floor"] = cfg["pct_15m_min"]
             alert = build_alert(enriched, floor, view_1h, view_15, _oi_change_pct(old, a["coin"], a.get("oi_usd")), nowm)
+            if names:
+                alert["trigger"] = "+".join(names)
+            alert["_side"] = early.get("side") if early.get("hit") else None
+            alert["_bars"] = (cs_h or cs_m or [])[-int(cfg["watch_impulse_bars"]):]
+            names_set = set(names)
+            impulse = names_set & {"1h_atr", "1h_legacy", "15m_early", "3h_escalera", "squeeze_breakout"}
+            if early.get("hit") and "absorption" in names_set and not impulse:
+                alert["urgency"] = "baja"
+                alert["side"] = early.get("side")
+                absorbed = early.get("absorption") or {}
+                if absorbed.get("rvol") is not None:
+                    alert["absorption_rvol"] = round(absorbed["rvol"], 2)
+                alert["absorption_repeats"] = absorbed.get("repeats")
+                alert["_range_low"] = absorbed.get("range_low")
+                alert["_range_high"] = absorbed.get("range_high")
             pending.append(alert)
+    done = {row["coin"] for row in rows}
     for _, a in ranked[int(cfg["max_candle_calls"]):]:
+        if a["coin"] in done:
+            continue
         rows.append(_row_from(a, floor_for(a, cfg), None, None, "fuera del top"))
 
     today = nowm.strftime("%Y-%m-%d")
@@ -944,36 +1369,50 @@ def run_cycle(cfg):
         for row in rows:
             if row["coin"] in silenced_coins and row["resultado"] == "alerta":
                 row["resultado"] = "silencio"
+    to_post = [p for p in sendable if _wants_webhook(p, cfg)]
+    watch_only = [p for p in sendable if not _wants_webhook(p, cfg)]
     logged = []
     if pending and not sendable:
         status = "quiet_hours_logged"
         logged = pending
-    elif sendable:
+    elif to_post:
         capped = day_n >= cfg["max_alerts_per_day"] or hour_n >= cfg["max_alerts_per_hour"]
         if capped:
             status = "hourly_cap_logged" if hour_n >= cfg["max_alerts_per_hour"] else "daily_cap_logged"
             for row in rows:
-                if row["resultado"] == "alerta":
+                if row["resultado"] == "alerta" and row["coin"] in {p["coin"] for p in to_post}:
                     row["resultado"] = "tope"
+            logged = to_post
         else:
-            status = send(sendable, cfg)
+            status = send([_public_alert(p) for p in to_post], cfg)
             if status in ("posted", "dry_run"):
                 st["wakes"][today] = day_n + 1
                 st["wakes_hour"][hour_key] = hour_n + 1
-                for p in sendable:
-                    kinds = set((p.get("trigger") or "").split("+"))
+                for p in to_post:
+                    kinds = _trigger_set(p)
                     if kinds - {"3h_escalera"}:
                         st["last_fire"][p["coin"]] = now
                     if "3h_escalera" in kinds:
                         st["last_fire_escalera"][p["coin"]] = now
-                sent_n = len(sendable) if status == "posted" else 0
-                counted = len(sendable)
-            else:
-                counted = 0
-        logged = sendable
+                sent_n = len(to_post) if status == "posted" else 0
+                counted = len(to_post)
+            logged = to_post
+    if watch_only:
+        if status == "none":
+            status = "watch_only"
+        for p in watch_only:
+            kinds = _trigger_set(p)
+            # A shadow-only early signal must not block a later explosion.
+            if kinds & PHASE1_TRIGGERS:
+                if kinds - {"3h_escalera"}:
+                    st["last_fire"][p["coin"]] = now
+                if "3h_escalera" in kinds:
+                    st["last_fire_escalera"][p["coin"]] = now
+        logged = logged + watch_only
     if logged:
         append_jsonl(ALERTS, {
-            "at": nowm.isoformat(timespec="seconds"), "status": status, "alerts": logged,
+            "at": nowm.isoformat(timespec="seconds"), "status": status,
+            "alerts": [{k: v for k, v in p.items() if not k.startswith("_")} for p in logged],
         })
         for p in logged:
             log(
@@ -982,6 +1421,99 @@ def run_cycle(cfg):
                 f"floor={p['floor_pct']} atr={p['atr_pct']} tradable={p['tradable']} "
                 f"label={p['label']} exhaustion={p['exhaustion_flag']}"
             )
+    # Phase 2 reads watches opened on earlier scans. New watches are added after,
+    # so the impulse bar itself is not treated as the retest.
+    assets_by_coin = {a["coin"]: a for a in assets}
+    allow_entry = not (quiet and cfg.get("entry_ready_respect_quiet_hours", True))
+    entry_payloads = []
+    kept = []
+    for w in st.get("watches") or []:
+        if w.get("status") != "open":
+            if w.get("status") == "entry_sent" and now - w.get("entry_sent_at", now) < 7 * 86400:
+                kept.append(w)
+            continue
+        ext = extremes.get(w["coin"])
+        mark = fresh_m.get(w["coin"])
+        if ext:
+            high, low, close = ext
+        elif mark is not None:
+            high = low = close = mark
+        else:
+            high = low = close = None
+        book = assets_by_coin.get(w["coin"])
+        if book:
+            w["day_ntl"] = book.get("dayNtlVlm")
+            w["oi_usd"] = book.get("oi_usd")
+            w["funding_pct"] = _funding_pct(book)
+            if book.get("dex"):
+                w["dex"] = book.get("dex")
+        w, event = watchmod.advance_watch(w, high, low, close, now, cfg, allow_entry=allow_entry)
+        if event == "entry_ready":
+            ok_short, why = short_entry_allowed(w, cfg)
+            if not ok_short:
+                w["status"] = "open"
+                for key in ("fill", "rr", "entry_sent_at"):
+                    w.pop(key, None)
+                if w.get("short_block") != why:
+                    log(f"corto no enviado {w['coin']}: {why}")
+                    w["short_block"] = why
+            else:
+                w.pop("short_block", None)
+                entry_payloads.append(_entry_payload(w, nowm))
+        if event == "quiet" and not w.get("quiet_noted"):
+            log(f"entrada en silencio {w['coin']} {w['side']}")
+            w["quiet_noted"] = True
+        if w.get("status") in ("open", "entry_sent"):
+            kept.append(w)
+    open_keys = {(w["coin"], w["side"]): w for w in kept if w.get("status") == "open"}
+    for alert in pending:
+        if alert.get("urgency") == "baja" and alert.get("_side") in ("long", "short"):
+            # The range has not broken yet. Direction is the close location
+            # (or the taker imbalance), not the largest wiggle inside the range.
+            side = alert["_side"]
+        else:
+            side = _side_from_moves(alert.get("pct_3h"), alert.get("pct_1h"), alert.get("pct_15m"), alert.get("_side"))
+        if not side:
+            continue
+        absorption_watch = alert.get("urgency") == "baja" and alert.get("_range_low") is not None
+        existing = open_keys.get((alert["coin"], side))
+        if existing and not (absorption_watch and existing.get("kind") == "absorption"):
+            continue
+        if absorption_watch:
+            built = watchmod.build_absorption_watch(
+                alert["coin"], alert.get("dex"), side, alert.get("trigger"),
+                alert.get("_range_low"), alert.get("_range_high"), now, cfg,
+            )
+        else:
+            bars = alert.get("_bars") or []
+            if len(bars) < 1:
+                continue
+            built = watchmod.build_watch(alert["coin"], alert.get("dex"), side, alert.get("trigger"), bars, now, cfg)
+        if not built:
+            continue
+        built["day_ntl"] = alert.get("dayNtlVlm")
+        built["oi_usd"] = alert.get("oi_usd")
+        built["funding_pct"] = alert.get("funding_pct")
+        if existing and existing.get("kind") == "absorption":
+            # A later spike in the same campaign widens the range and restarts the clock.
+            built["created_at"] = existing.get("created_at", now)
+            for key, value in built.items():
+                if key != "created_at":
+                    existing[key] = value
+            continue
+        kept.append(built)
+        open_keys[(alert["coin"], side)] = built
+    st["watches"] = kept[-80:]
+    if entry_payloads:
+        entry_status = send(entry_payloads, cfg)
+        append_jsonl(ALERTS, {
+            "at": nowm.isoformat(timespec="seconds"), "status": entry_status, "alerts": entry_payloads,
+        })
+        for item in entry_payloads:
+            log(
+                f"entry_ready {item['coin']} {item['side']} entrada={item['entry']} "
+                f"sl={item['sl']} tp1={item['tp1']} rr={item['rr']} trigger={item['trigger']}"
+            )
     st["wakes"] = {k: v for k, v in st["wakes"].items() if k >= today}
     st["wakes_hour"] = {k: v for k, v in st["wakes_hour"].items() if k == hour_key}
     cooldown_s = cfg["cooldown_hours"] * H
@@ -989,6 +1521,8 @@ def run_cycle(cfg):
     st["last_fire_escalera"] = {
         k: v for k, v in st["last_fire_escalera"].items() if now - v < cooldown_s
     }
+    fresh_shadow = _take_shadow_rows(st, shadow_rows, now, cfg)
+    st["last_shadow"] = {k: v for k, v in st["last_shadow"].items() if now - v < cooldown_s}
     atomic_write(STATE, json.dumps(st, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
 
     when = nowm.strftime("%Y-%m-%d %H:%M")
@@ -996,10 +1530,15 @@ def run_cycle(cfg):
     markdown = render_scan_markdown(
         when, mode, snap.get("count"), len(ranked), n_series, len(pending), sent_n, status, rows,
     )
+    markdown += "\n" + _shadow_markdown(fresh_shadow)
+    if entry_payloads:
+        sent = ", ".join(f"{p['coin']} {p['side_label']}" for p in entry_payloads)
+        markdown += f"\n\n- `entry_ready` enviado en esta pasada: {sent}"
     print(markdown, flush=True)
     write_summary(markdown.splitlines())
     try:
         write_scans(when, today, markdown, rows, cfg["scan_keep_days"])
+        write_shadow(when, today, fresh_shadow, cfg["shadow_keep_days"])
     except Exception as e:
         log(f"no se pudo escribir el historial de scans: {e}")
     line = (
