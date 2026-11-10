@@ -1,29 +1,38 @@
 # Detector de explosiones de perpetuos en Hyperliquid.
 # El cron solo corre cuando este fichero está en la rama por defecto (main).
+# En este repo GitHub a menudo arranca el horario solo una vez por hora.
+# Cada arranque hace varias pasadas, separadas unos 15 minutos.
 # Los secrets se pasan por el entorno del paso y no se imprimen.
 
 name: Detector de explosiones
 
 on:
   schedule:
-    # UTC. GitHub puede arrancar el job unos minutos más tarde.
+    # UTC. GitHub puede retrasar o saltarse arranques.
     - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       force_test_post:
-        description: "Enviar un POST de prueba al webhook"
+        description: "Enviar un POST de prueba al webhook (una sola pasada, sin bucle)"
         required: false
         default: false
         type: boolean
+      iterations:
+        description: "Número de pasadas (la prueba del webhook ignora esto y hace 1)"
+        required: false
+        default: 4
+        type: number
 
-# Una sola ejecución a la vez. La que ya corre termina y guarda el estado;
-# la siguiente espera. No se cancelan entre sí.
+# No se cancela la ejecución que está a punto de guardar el estado.
+# Si llega otra, espera. El bucle, tras guardar, mira la cola y cede el sitio
+# para no repetir el mismo cuarto de hora.
 concurrency:
   group: explosion-detector
   cancel-in-progress: false
 
 permissions:
   contents: write
+  actions: read
 
 defaults:
   run:
@@ -33,7 +42,7 @@ jobs:
   detect:
     name: detectar
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 70
     steps:
       - name: Descargar el código
         uses: actions/checkout@v4
@@ -46,20 +55,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Restaurar estado
-        run: bash scripts/restore_state.sh
-
-      - name: Ejecutar detector
+      - name: Pasadas del detector
         env:
           EXPLOSION_WEBHOOK_URL: ${{ secrets.EXPLOSION_WEBHOOK_URL }}
           EXPLOSION_WEBHOOK_AUTH: ${{ secrets.EXPLOSION_WEBHOOK_AUTH }}
-          # En un cron, inputs no viene informado: el resultado es la cadena false.
           FORCE_TEST_POST: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.force_test_post == 'true' || inputs.force_test_post == true) && 'true' || 'false' }}
+          SCAN_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.iterations || '4' }}
           PYTHONUNBUFFERED: "1"
-        run: python detector.py
-
-      # Si el ciclo falló antes de escribir estado, no hay data/state_ready
-      # y esta rama no se toca. Un fallo del POST de prueba sí guarda la memoria.
-      - name: Guardar estado
-        if: ${{ !cancelled() && hashFiles('data/state_ready') != '' }}
-        run: bash scripts/save_state.sh
+        run: bash scripts/scan_loop.sh
