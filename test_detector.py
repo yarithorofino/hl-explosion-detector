@@ -188,7 +188,15 @@ class DetectorTests(unittest.TestCase):
         detector.candles = candle_fn or route()
         if state is not None:
             detector.STATE.write_text(json.dumps(state), encoding="utf-8")
-        return detector.run_cycle(cfg or load_cfg())
+        use = load_cfg()
+        if cfg:
+            use.update(cfg)
+        # These scans are about the explosion rules. Extra liquid names and
+        # the live trade tape are covered by their own tests.
+        use["early_extra_names"] = 0
+        use["early_rotate_names"] = 0
+        use["cvd_max_coins"] = 0
+        return detector.run_cycle(use)
 
     def read_state(self):
         return json.loads(detector.STATE.read_text(encoding="utf-8"))
@@ -316,6 +324,43 @@ class DetectorTests(unittest.TestCase):
         text = self.latest()
         self.assertIn("alerta", text)
         self.assertIn("no llega", text)
+
+    def test_repeated_absorption_opens_a_breakout_watch(self):
+        def candles(coin, interval, n_bars):
+            if interval == "15m":
+                return quiet_15m()
+            cs = []
+            price = 100.0
+            for i in range(80):
+                o = price
+                c = price * (1.012 if i % 2 == 0 else 0.988)
+                h = max(o, c) * 1.002
+                l = min(o, c) * 0.998
+                cs.append({"t": i * 3_600_000, "o": o, "h": h, "l": l, "c": c, "v": 10.0})
+                price = c
+            # The confirming spike is the hour that just closed. The live hour is quiet.
+            for idx in (len(cs) - 9, len(cs) - 2):
+                o = cs[idx]["o"]
+                cs[idx] = {
+                    "t": cs[idx]["t"], "o": o, "h": o * 1.004, "l": o * 0.998,
+                    "c": o * 1.003, "v": 200.0,
+                }
+            return cs
+
+        self.assertTrue(self.cycle(
+            [asset("SOPH", pct_24h=10, day=1_270_000)], candle_fn=candles,
+        ))
+        item = self.alerts()[0]["alerts"][0]
+        self.assertEqual(item["trigger"], "absorption")
+        self.assertEqual(item["urgency"], "baja")
+        self.assertEqual(item["side"], "long")
+        self.assertGreaterEqual(item["absorption_repeats"], 2)
+        self.assertGreaterEqual(item["absorption_rvol"], 8)
+        watches = [w for w in self.read_state()["watches"] if w.get("status") == "open"]
+        self.assertEqual(len(watches), 1)
+        self.assertEqual(watches[0]["kind"], "absorption")
+        self.assertEqual(watches[0]["side"], "long")
+        self.assertGreater(watches[0]["impulse_high"], watches[0]["impulse_low"])
 
     def test_15m_early_trigger(self):
         def candles(coin, interval, n_bars):
