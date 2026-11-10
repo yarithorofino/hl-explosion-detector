@@ -78,6 +78,158 @@ def build_watch(coin, dex, side, trigger, candles, now, cfg):
     }
 
 
+def structural_targets(cs, side, price, wing=2, day_bars=24):
+    """First two levels beyond `price` in the trade direction.
+
+    A level is a Williams fractal (a high or low beyond `wing` bars on each
+    side) or the 24h high/low of the hourly candles. The nearer one is TP1.
+    Nothing past that level is a target: a measured move that clears it is
+    not used.
+    """
+    price = _f(price)
+    if not cs or price is None or price <= 0 or side not in ("long", "short"):
+        return None, None
+    highs, lows = [], []
+    for c in cs:
+        highs.append(_f(c.get("h")))
+        lows.append(_f(c.get("l")))
+    levels = []
+    wing = int(wing)
+    window = (highs if side == "long" else lows)[-int(day_bars):]
+    if side == "long":
+        day = max((v for v in window if v is not None), default=None)
+        if day is not None and day > price:
+            levels.append(day)
+        for i in range(wing, len(highs) - wing):
+            h = highs[i]
+            if h is None or h <= price:
+                continue
+            if all(highs[j] is not None and h > highs[j] for j in range(i - wing, i + wing + 1) if j != i):
+                levels.append(h)
+        ordered = sorted(levels)
+    else:
+        day = min((v for v in window if v is not None), default=None)
+        if day is not None and day < price:
+            levels.append(day)
+        for i in range(wing, len(lows) - wing):
+            lo = lows[i]
+            if lo is None or lo >= price:
+                continue
+            if all(lows[j] is not None and lo < lows[j] for j in range(i - wing, i + wing + 1) if j != i):
+                levels.append(lo)
+        ordered = sorted(levels, reverse=True)
+    unique = []
+    for level in ordered:
+        if not unique or abs(level - unique[-1]) > abs(price) * 1e-8:
+            unique.append(level)
+    tp1 = unique[0] if unique else None
+    tp2 = unique[1] if len(unique) > 1 else None
+    return tp1, tp2
+
+
+def upper_wick_pct(c):
+    """Upper wick as a percent of the bar's range. Not the directional wick."""
+    o, h, l, cl = _f(c.get("o")), _f(c.get("h")), _f(c.get("l")), _f(c.get("c"))
+    if None in (o, h, l, cl):
+        return None
+    rng = h - l
+    if rng <= 0:
+        return 0.0
+    return (h - max(o, cl)) / rng * 100
+
+
+def last_closed_hour(cs):
+    """The API's last hourly bar is still forming, so the closed one is the previous."""
+    if not cs:
+        return None
+    if len(cs) >= 2:
+        return cs[-2]
+    return cs[-1]
+
+
+def wick_blocks_long(cs_1h, entry, max_wick_pct):
+    """A long rejection sitting on the entry: upper wick over half the hour."""
+    bar = last_closed_hour(cs_1h)
+    entry = _f(entry)
+    if bar is None or entry is None:
+        return False
+    high = _f(bar.get("h"))
+    wick = upper_wick_pct(bar)
+    if high is None or wick is None or high < entry:
+        return False
+    return wick > float(max_wick_pct)
+
+
+def knife_no_base(cs_15m, mark, now_ms, drop_pct, min_minutes, max_minutes):
+    """Price fell more than `drop_pct` over the last 30–60 minutes and did not base.
+
+    The reference is the high of the 15m bars opened 30 to 60 minutes ago.
+    A base is a later bar that stops making a lower low. Without that pause
+    the long is catching the fall.
+    """
+    mark = _f(mark)
+    if not cs_15m or mark is None or mark <= 0 or now_ms is None:
+        return False
+    min_ms = int(min_minutes) * 60 * 1000
+    max_ms = int(max_minutes) * 60 * 1000
+    ref = None
+    recent = []
+    for c in cs_15m:
+        t = c.get("t") or 0
+        age = now_ms - t
+        if age < 0 or age > max_ms:
+            continue
+        if age >= min_ms:
+            h = _f(c.get("h"))
+            if h is not None:
+                ref = h if ref is None else max(ref, h)
+        else:
+            recent.append(c)
+    if ref is None or ref <= mark:
+        return False
+    if (ref - mark) / ref * 100 <= float(drop_pct):
+        return False
+    for prev, nxt in zip(recent, recent[1:]):
+        lo_prev, lo_next = _f(prev.get("l")), _f(nxt.get("l"))
+        if lo_prev is not None and lo_next is not None and lo_next >= lo_prev:
+            return False
+    return True
+
+
+def qualify_entry(watch, mark, cs_1h, cs_15m, now_ms, cfg):
+    """Replace the measured target with the first structural level and recheck R:R.
+
+    Returns (ok, reason). On success the watch's fill, tp1, tp2 and rr match
+    the mark and that level. The watch is not otherwise changed.
+    """
+    side = watch.get("side")
+    price = _f(mark)
+    if price is None:
+        price = _f(watch.get("fill"))
+    tp1, tp2 = structural_targets(
+        cs_1h, side, price,
+        wing=int(cfg.get("swing_wing", 2)),
+        day_bars=int(cfg.get("avg_window_hours", 24)),
+    )
+    if tp1 is None:
+        return False, "sin nivel estructural por delante"
+    rr = reward_risk(side, price, watch.get("sl"), tp1)
+    if rr is None or rr < float(cfg["watch_rr_min"]):
+        return False, "R:R con el nivel estructural por debajo de 2"
+    if side == "long" and wick_blocks_long(cs_1h, price, cfg["exhaustion_wick_pct"]):
+        return False, "mecha superior de la hora cerrada"
+    if side == "long" and knife_no_base(
+        cs_15m, price, now_ms,
+        cfg["knife_drop_pct"], cfg["knife_min_minutes"], cfg["knife_max_minutes"],
+    ):
+        return False, "caída de más del 15% sin base"
+    watch["fill"] = price
+    watch["tp1"] = tp1
+    watch["tp2"] = tp2 if tp2 is not None else tp1
+    watch["rr"] = rr
+    return True, ""
+
+
 def reward_risk(side, price, sl, tp1):
     if price is None or sl is None or tp1 is None:
         return None

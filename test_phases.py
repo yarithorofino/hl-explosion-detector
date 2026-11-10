@@ -212,6 +212,91 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(hit, "sl")
 
 
+class StructuralTargetTests(unittest.TestCase):
+    """The four live alerts whose measured TP1 sat past the first real level."""
+
+    def setUp(self):
+        self.cfg = load_cfg()
+
+    def _hours(self, n, high=None, low=None, spikes=None):
+        spikes = spikes or {}
+        cs = []
+        for i in range(n):
+            h, lo = spikes.get(i, (high, low))
+            cs.append({"t": i * 3_600_000, "o": high, "h": h, "l": lo, "c": high, "v": 1})
+        return cs
+
+    def test_init_long_stops_at_the_day_high(self):
+        # Measured TP was 0.3235. The day high, 0.2825, comes first.
+        cs = self._hours(26, high=0.20, low=0.19, spikes={10: (0.2825, 0.19)})
+        tp1, tp2 = watchmod.structural_targets(cs, "long", 0.25)
+        self.assertEqual(tp1, 0.2825)
+        self.assertNotEqual(tp1, 0.3235)
+        self.assertIsNone(tp2)
+        watch = {"side": "long", "sl": 0.20, "fill": 0.27}
+        ok, reason = watchmod.qualify_entry(watch, 0.27, cs, None, None, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("R:R", reason)
+
+    def test_nbis_long_uses_the_nearer_resistance(self):
+        # 141.34 is the first swing. The day high 146.35 is the next. 151.68 is beyond both.
+        cs = self._hours(26, high=130.0, low=128.0, spikes={
+            8: (141.34, 128.0),
+            20: (146.35, 128.0),
+        })
+        tp1, tp2 = watchmod.structural_targets(cs, "long", 130.0)
+        self.assertEqual(tp1, 141.34)
+        self.assertEqual(tp2, 146.35)
+        self.assertLess(tp1, 151.68)
+
+    def test_iren_short_stops_at_the_first_support(self):
+        # Support sits at 19.2 then 19.05. The day low 16.43 is further down.
+        cs = self._hours(26, high=26.0, low=25.5, spikes={
+            8: (26.0, 19.2),
+            14: (26.0, 19.05),
+            20: (26.0, 16.43),
+        })
+        tp1, tp2 = watchmod.structural_targets(cs, "short", 22.0)
+        self.assertEqual(tp1, 19.2)
+        self.assertEqual(tp2, 19.05)
+        self.assertGreater(tp1, 16.43)
+
+    def test_soxl_short_stops_at_support_not_past_it(self):
+        cs = self._hours(26, high=70.0, low=65.0, spikes={
+            8: (70.0, 52.0),
+            20: (70.0, 44.4),
+        })
+        tp1, tp2 = watchmod.structural_targets(cs, "short", 60.0)
+        self.assertEqual(tp1, 52.0)
+        self.assertEqual(tp2, 44.4)
+        self.assertNotEqual(tp1, 44.4)
+
+    def test_upper_wick_and_a_fall_without_a_base_block_a_long(self):
+        cs = self._hours(26, high=10.0, low=9.0, spikes={8: (20.0, 9.0)})
+        # Last closed hour rejects from above the entry.
+        cs[-2] = {"t": cs[-2]["t"], "o": 10.0, "h": 14.0, "l": 10.0, "c": 11.0, "v": 1}
+        self.assertTrue(watchmod.wick_blocks_long(cs, 12.0, self.cfg["exhaustion_wick_pct"]))
+        now = 10_000_000
+        falling = [
+            {"t": now - 45 * 60 * 1000, "h": 100.0, "l": 90.0, "o": 100, "c": 92},
+            {"t": now - 15 * 60 * 1000, "h": 85.0, "l": 80.0, "o": 85, "c": 81},
+            {"t": now, "h": 75.0, "l": 70.0, "o": 75, "c": 70},
+        ]
+        self.assertTrue(watchmod.knife_no_base(
+            falling, 70.0, now, self.cfg["knife_drop_pct"],
+            self.cfg["knife_min_minutes"], self.cfg["knife_max_minutes"],
+        ))
+        based = [
+            falling[0],
+            {"t": now - 15 * 60 * 1000, "h": 80.0, "l": 74.0, "o": 78, "c": 76},
+            {"t": now, "h": 78.0, "l": 75.0, "o": 76, "c": 77},
+        ]
+        self.assertFalse(watchmod.knife_no_base(
+            based, 76.0, now, self.cfg["knife_drop_pct"],
+            self.cfg["knife_min_minutes"], self.cfg["knife_max_minutes"],
+        ))
+
+
 class ShadowReportTests(unittest.TestCase):
     def test_lead_time_and_false_alarm(self):
         import shadow_report
