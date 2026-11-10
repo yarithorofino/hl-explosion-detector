@@ -184,13 +184,13 @@ Si un ciclo no consigue leer Hyperliquid, no toca esa memoria. El fallo se ve en
 
 El reloj de GitHub va en UTC y el fichero pide un arranque cada 15 minutos (`*/15 * * * *`). En este repositorio público GitHub a menudo **no lo arranca cada cuarto de hora**: las ejecuciones automáticas pueden quedar separadas unos 60 minutos (por ejemplo 03:33, 04:30, 05:35).
 
-Por eso cada arranque no mira el mercado una vez: hace **4 pasadas**. La primera es en cuanto empieza. Luego espera al siguiente minuto :00, :15, :30 o :45, más 20 segundos para que la vela de 15 minutos ya esté cerrada, y vuelve a mirar. No empieza una pasada nueva si el trabajo ya lleva unos 60 minutos. El tope del job es 70 minutos, para que la última pasada pueda terminar.
+Por eso cada arranque no mira el mercado una vez: hace **5 pasadas**. La primera es en cuanto empieza. Luego espera al siguiente minuto :00, :15, :30 o :45, más 20 segundos para que la vela de 15 minutos ya esté cerrada, y vuelve a mirar. Con cinco pasadas entra también el :45; con cuatro el trabajo se quedaba en el :30 y el :45 quedaba sin vigilar unos 25 minutos. No empieza una pasada nueva si el trabajo ya lleva unos 60 minutos. El tope del job es 70 minutos, para que la última pasada pueda terminar. Un arranque a las 08:55 mira hacia las 08:55, 09:00, 09:15, 09:30 y 09:45.
 
 Después de **cada** pasada se guarda la memoria en la rama `detector-state` (pausas, cupos, precios) y la fila del CSV. La siguiente pasada vuelve a leer esa rama, así no se repite un aviso ni se saltan los topes (10 al día, 2 por hora, 4 horas por activo, silencio de 00:00 a 08:00).
 
 Si GitHub llega a lanzar otro trabajo mientras este sigue en marcha, el nuevo espera. No corta al que está guardando. Cuando el que corre termina una pasada y ve que hay otro en la cola, deja el sitio: no duerme hasta el siguiente cuarto de hora. El que esperaba sigue desde ese momento. Así no se barren dos veces los mismos cuartos, y si aun así coinciden un instante, la pausa de 4 horas evita el aviso duplicado.
 
-Para lanzarlo a mano: **Run workflow**. El número de pasadas sale en 4. Márcalo a 1 si solo quieres un vistazo. La casilla del POST de prueba ignora ese número y hace una sola pasada.
+Para lanzarlo a mano: **Run workflow**. El número de pasadas sale en 5. Márcalo a 1 si solo quieres un vistazo. La casilla del POST de prueba ignora ese número y hace una sola pasada.
 
 En un repositorio público, GitHub **apaga los horarios si pasan 60 días sin actividad** en el repositorio. Cada ejecución que guarda estado deja un commit en `detector-state`, y un commit es actividad, así que mientras el detector funcione no deberían cumplirse esos 60 días. Si aun así lo apaga (suele avisar por correo), la pantalla de Actions enseña un aviso y un botón **Enable workflow** (**Habilitar workflow**). Pulsa ese botón y, si quieres, lanza una ejecución manual para no esperar al siguiente cuarto de hora.
 
@@ -203,4 +203,4 @@ El horario solo funciona con el fichero en `main`. En repos públicos, los minut
 - **Guardar estado** en rojo con `403` o `Permission denied` → falta el permiso **Read and write permissions** de la sección de arriba.
 - No aparece ninguna ejecución → el pull request no está fusionado en `main`, Actions está desactivado, o el horario se apagó por los 60 días.
 
-Para volver a lanzarlo a mano: **Actions** → **Detector de explosiones** → **Run workflow**. Sin la casilla hace las pasadas que pongas (4 si no cambias el número). Con la casilla manda el POST de prueba y solo hace una pasada.
+Para volver a lanzarlo a mano: **Actions** → **Detector de explosiones** → **Run workflow**. Sin la casilla hace las pasadas que pongas (5 si no cambias el número). Con la casilla manda el POST de prueba y solo hace una pasada.

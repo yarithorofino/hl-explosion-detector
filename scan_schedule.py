@@ -14,7 +14,7 @@ import urllib.request
 PERIOD_SEC = 15 * 60
 SLOT_OFFSET_SEC = 20
 MAX_RUNTIME_SEC = 60 * 60
-DEFAULT_ITERATIONS = 4
+DEFAULT_ITERATIONS = 5
 MAX_ITERATIONS = 8
 WAITING = {"queued", "pending", "waiting", "requested"}
 
