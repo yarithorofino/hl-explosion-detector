@@ -83,7 +83,7 @@
   "early_weight_absorption": 3,
   "early_weight_absorption_repeat": 5,
   "early_rotate_names": 16,
-  "phase1_webhook": "tradable",
+  "phase1_webhook": "watch",
   "mode_absorption": "shadow",
   "mode_vol_accel": "shadow",
   "mode_squeeze": "shadow",
@@ -96,5 +96,5 @@
   "shadow_keep_days": 14,
   "webhook_auth_header": "Authorization",
   "webhook_auth_format": "Bearer {key}",
-  "_note": "La fase 1 (1h_atr, 1h_legacy, 15m_early, 3h_escalera) anota y abre vigilancia. phase1_webhook=tradable: solo llama al webhook si el libro ya es operable (1M$). live restaura el aviso de antes para todos. watch no llama nunca. Las senales tempranas estan en shadow y no llaman; pasar una a live la promueve. entry_ready si llama, con R:R >= 2. Un corto exige 5M$ de volumen 24h, en HIP-3 OI >= 1M$, y funding por encima de -0.01%/h. De noche no hay POST. URL y cabecera por EXPLOSION_WEBHOOK_URL y EXPLOSION_WEBHOOK_AUTH."
+  "_note": "La fase 1 (1h_atr, 1h_legacy, 15m_early, 3h_escalera) anota y abre vigilancia. phase1_webhook=watch: no llama al webhook. tradable llama solo si el libro ya es operable (1M$). live restaura el aviso de antes para todos. Las senales tempranas estan en shadow y no llaman; pasar una a live la promueve. entry_ready si llama, con R:R >= 2. Un corto exige 5M$ de volumen 24h, en HIP-3 OI >= 1M$, y funding por encima de -0.01%/h. De noche no hay POST. URL y cabecera por EXPLOSION_WEBHOOK_URL y EXPLOSION_WEBHOOK_AUTH."
 }

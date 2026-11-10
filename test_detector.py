@@ -237,7 +237,7 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(cfg["quiet_end_hour"], 8)
         self.assertEqual(cfg["prefilter_pct_15m"], 3.0)
         self.assertEqual(cfg["scan_keep_days"], 14)
-        self.assertEqual(cfg["phase1_webhook"], "tradable")
+        self.assertEqual(cfg["phase1_webhook"], "watch")
         self.assertEqual(cfg["mode_absorption"], "shadow")
         self.assertEqual(cfg["mode_squeeze"], "shadow")
         self.assertEqual(cfg["short_min_day_ntl_usd"], 5_000_000)
@@ -295,11 +295,12 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(item["label"], "operable")
         self.assertIn("ATR %", self.latest())
         self.assertIn("alerta", self.latest())
+        self.assertEqual(self.alerts()[0]["status"], "watch_only")
         st = self.read_state()
-        self.assertEqual(st["wakes"]["2026-06-15"], 1)
-        self.assertEqual(st["wakes_hour"]["2026-06-15T12"], 1)
+        self.assertEqual(st["wakes"], {})
+        self.assertEqual(st["wakes_hour"], {})
         self.assertEqual(st["last_fire"]["AAA"], NOW)
-        self.assertIn("status=dry_run", detector.LOG.read_text(encoding="utf-8"))
+        self.assertNotIn("status=dry_run", detector.LOG.read_text(encoding="utf-8"))
 
     def test_small_book_is_flagged_not_tradable(self):
         calls = []
@@ -425,17 +426,23 @@ class DetectorTests(unittest.TestCase):
 
     def test_quiet_hours_end_at_08(self):
         self.freeze(8)
+        calls = []
+        detector.send = lambda payload, cfg: calls.append(payload) or "posted"
         self.assertTrue(self.cycle([asset("AAA")]))
-        self.assertEqual(self.alerts()[0]["status"], "dry_run")
+        self.assertEqual(calls, [])
+        self.assertEqual(self.alerts()[0]["status"], "watch_only")
         self.assertIn("alerta", self.latest())
+        self.assertNotIn("silencio", self.latest().split("Resultado:")[0])
 
     def test_daily_and_hourly_caps(self):
         def forbid_send(*_a, **_k):
             raise AssertionError("el tope no debe hacer POST")
 
         detector.send = forbid_send
+        live = load_cfg(phase1_webhook="live")
         self.assertTrue(self.cycle(
             [asset("AAA")],
+            cfg=live,
             state={"marks": [], "last_fire": {}, "wakes": {"2026-06-15": 10}, "wakes_hour": {}},
         ))
         self.assertEqual(self.alerts()[0]["status"], "daily_cap_logged")
@@ -444,6 +451,7 @@ class DetectorTests(unittest.TestCase):
 
         self.assertTrue(self.cycle(
             [asset("BBB", pct_24h=20)],
+            cfg=live,
             state={"marks": [], "last_fire": {}, "wakes": {}, "wakes_hour": {"2026-06-15T12": 2}},
         ))
         self.assertEqual(self.alerts()[-1]["status"], "hourly_cap_logged")
@@ -460,7 +468,7 @@ class DetectorTests(unittest.TestCase):
 
     def test_post_failed_does_not_consume_a_slot(self):
         detector.send = lambda payload, cfg: "post_failed"
-        self.assertTrue(self.cycle([asset("AAA")]))
+        self.assertTrue(self.cycle([asset("AAA")], cfg=load_cfg(phase1_webhook="live")))
         st = self.read_state()
         self.assertEqual(st["wakes"], {})
         self.assertEqual(st["wakes_hour"], {})
@@ -475,7 +483,10 @@ class DetectorTests(unittest.TestCase):
             return "posted"
 
         detector.send = record
-        self.assertTrue(self.cycle([asset("AAA", pct_24h=30), asset("BBB", pct_24h=12)]))
+        self.assertTrue(self.cycle(
+            [asset("AAA", pct_24h=30), asset("BBB", pct_24h=12)],
+            cfg=load_cfg(phase1_webhook="live"),
+        ))
         self.assertEqual(len(calls), 1)
         self.assertEqual({p["coin"] for p in calls[0]}, {"AAA", "BBB"})
         self.assertEqual(self.read_state()["wakes"]["2026-06-15"], 1)
@@ -624,7 +635,7 @@ class DetectorTests(unittest.TestCase):
         self.assertTrue(self.cycle(
             [asset("STEP")],
             candle_fn=candles,
-            cfg=load_cfg(escalera_ignore_quiet_hours=True),
+            cfg=load_cfg(escalera_ignore_quiet_hours=True, phase1_webhook="live"),
             state={"marks": [], "last_fire": {}, "wakes": {}, "wakes_hour": {}},
         ))
         self.assertEqual(self.alerts()[-1]["status"], "dry_run")

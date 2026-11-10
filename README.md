@@ -6,7 +6,7 @@ Antes corría en un ordenador que se duerme. Ahora lo ejecuta GitHub cada 15 min
 
 Lo que llama al webhook, y por tanto despierta el análisis de pago, es `entry_ready`: el precio ha llegado a la zona, con entrada, stop, dos objetivos y un cobro de al menos el doble del riesgo. Lleva `side` (`long` o `short`) y `side_label` (`largo` o `corto`), más el disparo que abrió la vigilancia.
 
-La fase 1 (las reglas de abajo) se anota y abre esa vigilancia, pero **no llama al webhook** si el libro todavía no es operable. Si el volumen de 24 horas ya pasa de 1 millón (`tradable: true`), sí llama: es el comportamiento `phase1_webhook: "tradable"`. Para volver al aviso de antes, en todos los nombres, pon `"live"`. Para no llamar nunca en la fase 1, pon `"watch"`.
+La fase 1 (las reglas de abajo) se anota y abre esa vigilancia, y **no llama al webhook**. Da igual que el libro sea operable: el aviso de hoy llegaba con el movimiento ya hecho. `phase1_webhook` vale `"watch"`. `"tradable"` vuelve a llamar solo si el volumen de 24 horas pasa de 1 millón. `"live"` restaura el aviso de antes para todos los nombres.
 
 Las señales tempranas (absorción, volumen relativo, compresión, interés abierto, delta y funding) se calculan y se apuntan en `data/shadow/`, y salen en el resumen de la pasada, pero **no llaman al webhook**. Cada una tiene su interruptor en la configuración (`shadow` o `live`). En `live`, y solo si la puntuación llega al mínimo, esa señal sí puede llamar. Una vigilancia de absorción, aunque esté en sombra, sí puede acabar en `entry_ready`.
 
@@ -26,11 +26,11 @@ Grandes, con suelo del 3%: BTC, ETH y SOL (el nombre exacto del mercado) y, en e
 
 Para poder avisar hace falta liquidez: volumen de 24 horas de al menos **300.000 dólares**. Si no es el mercado principal (HIP-3), además el interés abierto tiene que ser de al menos **500.000 dólares**.
 
-Si el volumen de 24 horas es de menos de **1 millón**, la fase 1 queda anotada y abre vigilancia, pero no llama al webhook. Va marcada `tradable: false` y `label: "vigilancia, no operable"`. A partir de 1 millón va `tradable: true` y `label: "operable"`, y con la configuración actual la fase 1 sí llama.
+Si el volumen de 24 horas es de menos de **1 millón**, la fase 1 va marcada `tradable: false` y `label: "vigilancia, no operable"`. A partir de 1 millón va `tradable: true` y `label: "operable"`. En los dos casos se anota y abre vigilancia, y no llama al webhook.
 
 Si la mecha de rechazo de la vela que dispara (la de arriba cuando sube, la de abajo cuando baja) ocupa más del **50%** del rango, el aviso lleva `exhaustion_flag: true` y `exhaustion_label: "posible agotamiento"`.
 
-Si en el mismo cuarto de hora saltan varios, van todos en **un solo aviso**. El mismo activo no se repite hasta pasadas **4 horas**. Como máximo hay **10 avisos al día** y **2 por hora** (cada POST cuenta como uno, aunque lleve varios activos). La escalera cuenta igual para esos cupos. Tiene su propia pausa de 4 horas, así un aviso de escalera no impide, una hora después, el aviso del 8% o el de 15 minutos. De **00:00 a 08:00** (hora de Madrid) anota la señal pero no llama al webhook; a las 8 ya puede avisar. La prueba manual no gasta esos cupos.
+Si en el mismo cuarto de hora saltan varios, van todos en la misma anotación. El mismo activo no abre otra vigilancia hasta pasadas **4 horas**. La escalera tiene su propia pausa de 4 horas, así una escalera no impide, una hora después, el aviso del 8% o el de 15 minutos. Esos cupos de **10 al día** y **2 por hora** solo cuentan cuando la fase 1 vuelve a llamar al webhook (`tradable` o `live`). `entry_ready` no los gasta. De **00:00 a 08:00** (hora de Madrid) no hay ninguna llamada; a las 8, `entry_ready` puede salir si la zona sigue válida. La prueba manual no gasta esos cupos.
 
 ## Qué tienes que hacer tú
 
@@ -167,6 +167,7 @@ Qué significa `status`:
 | `posted` | El webhook ha respondido bien. |
 | `dry_run` | Había una señal, pero faltan los secretos. Aun así cuenta como aviso del día y de la hora. |
 | `post_failed` | Se intentó enviar y falló. No cuenta: si la señal sigue, lo reintenta en el siguiente ciclo. |
+| `watch_only` | La fase 1 quedó anotada y abrió vigilancia. No se ha llamado al webhook. |
 | `quiet_hours_logged` | Es de noche. Queda anotado y no se envía. |
 | `daily_cap_logged` | Ya se han enviado los 10 avisos de hoy. |
 | `hourly_cap_logged` | Ya se han enviado los 2 avisos de esta hora. |
