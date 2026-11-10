@@ -4,7 +4,15 @@ Este programa mira los perpetuos de Hyperliquid (el mercado principal y los de H
 
 Antes corría en un ordenador que se duerme. Ahora lo ejecuta GitHub cada 15 minutos, también con el ordenador apagado.
 
-Hay dos fases. La primera avisa del impulso (las reglas de abajo, más una señal temprana solo en nombres con al menos 1 millón de dólares de volumen en 24 horas, y solo si varias pistas coinciden). Al mismo tiempo guarda una vigilancia. Si el aviso es un impulso ya hecho, la zona es el retroceso del 38% al 50%, con invalidación y dos objetivos. Si el aviso es absorción (volumen alto con el precio quieto), la vigilancia es de urgencia baja: no pide entrar todavía, espera a que el precio salga de ese rango. La segunda fase avisa `entry_ready` solo si esa entrada aparece y el cobro hasta el primer objetivo es al menos el doble del riesgo. Ese aviso no gasta el cupo de 2 por hora ni el de 10 al día; no se repite para el mismo par y el mismo lado. De noche (00:00–08:00, Madrid) la fase 1 no llama al webhook. La fase 2 tampoco, salvo que en la configuración se ponga `entry_ready_respect_quiet_hours` a false. El estudio de la semana del 10 nov 2026 está en `reports/replay_2026-11-10.md`.
+Lo que llama al webhook, y por tanto despierta el análisis de pago, es `entry_ready`: el precio ha llegado a la zona, con entrada, stop, dos objetivos y un cobro de al menos el doble del riesgo. Lleva `side` (`long` o `short`) y `side_label` (`largo` o `corto`), más el disparo que abrió la vigilancia.
+
+La fase 1 (las reglas de abajo) se anota y abre esa vigilancia, pero **no llama al webhook** si el libro todavía no es operable. Si el volumen de 24 horas ya pasa de 1 millón (`tradable: true`), sí llama: es el comportamiento `phase1_webhook: "tradable"`. Para volver al aviso de antes, en todos los nombres, pon `"live"`. Para no llamar nunca en la fase 1, pon `"watch"`.
+
+Las señales tempranas (absorción, volumen relativo, compresión, interés abierto, delta y funding) se calculan y se apuntan en `data/shadow/`, y salen en el resumen de la pasada, pero **no llaman al webhook**. Cada una tiene su interruptor en la configuración (`shadow` o `live`). En `live`, y solo si la puntuación llega al mínimo, esa señal sí puede llamar. Una vigilancia de absorción, aunque esté en sombra, sí puede acabar en `entry_ready`.
+
+Un corto solo se envía si el volumen de 24 horas es de al menos **5 millones**, y en HIP-3 además el interés abierto es de al menos **1 millón**, y el funding no es de −0,01%/h o más negativo (ahí el corto ya está pagando). De **00:00 a 08:00** (Madrid) no hay ninguna llamada. La vigilancia y la sombra siguen de noche. Si a las 8 la zona sigue siendo válida, `entry_ready` sale entonces.
+
+El estudio de la semana del 10 nov está en `reports/replay_2026-11-10.md`. Para el repaso del 24 nov: `python3 shadow_report.py --fetch`.
 
 Avisa igual si el precio sube o si baja. Salta si se cumple **cualquiera** de estas reglas (el aviso dice cuáles):
 
@@ -12,13 +20,13 @@ Avisa igual si el precio sube o si baja. Salta si se cumple **cualquiera** de es
 - **Hora fija (1h_legacy).** El movimiento de la última hora es de al menos **8%**, con el mismo volumen (5 veces la media y 100.000 dólares). Sirve cuando la moneda ya iba muy movida y el ATR pide un salto enorme.
 - **Quince minutos (15m_early).** El movimiento de la vela de 15 minutos es de al menos **4%**, con un volumen de al menos **5 veces** la media de las velas de 15 minutos de las 24 horas anteriores y al menos **25.000 dólares**.
 - **Escalera de 3 horas (3h_escalera).** La suma del recorrido de las 3 últimas velas de 1 hora (de la apertura de la primera al cierre de la última) es de al menos **10%**. Al menos 2 de esas 3 cierran en esa dirección y marcan máximos más altos (o mínimos más bajos). No pide múltiplo de volumen. El aviso lleva `label: "escalera"`. `tradable` sigue la regla del millón. De noche se calla igual que el resto, salvo que en la configuración se ponga `escalera_ignore_quiet_hours` a true.
-- **Absorción (absorption).** Solo si el volumen de 24 horas es de al menos **1 millón**. La vela de 1 hora mueve al menos **8 veces** la mediana y **8 veces** la media de las 48 horas anteriores, el cierre a cierre se queda por debajo del **1%** y el rango de la vela por debajo del **2%**. Una sola vela no avisa. Si se repite dentro de esas 48 horas, el aviso sale con `urgency: "baja"`: es la vigilancia del rango, no una orden de entrar. La dirección sale de dónde cierra la vela dentro de su rango, o del desequilibrio de compradores y vendedores agresivos cuando esa muestra existe. Los nombres líquidos que no se están moviendo se turnan en las pasadas, para que un libro justo en el millón no se quede sin mirar.
+- **Absorción (absorption), en sombra.** Solo si el volumen de 24 horas es de al menos **1 millón**. La vela de 1 hora mueve al menos **8 veces** la mediana y **8 veces** la media de las 48 horas anteriores, el cierre a cierre se queda por debajo del **1%** y el rango de la vela por debajo del **2%**. Una sola vela no abre vigilancia. Si se repite dentro de esas 48 horas, abre una vigilancia de urgencia baja (no llama al webhook) y espera a que el precio salga del rango. La dirección sale de dónde cierra la vela, o del desequilibrio de agresores cuando esa muestra existe.
 
 Grandes, con suelo del 3%: BTC, ETH y SOL (el nombre exacto del mercado) y, en el mercado principal, cualquier perp cuyo volumen de 24 horas sea de **100 millones de dólares** o más. Un mercado HIP-3 no se vuelve grande solo por volumen. La lista y el umbral están en `data/detector_config.json`.
 
 Para poder avisar hace falta liquidez: volumen de 24 horas de al menos **300.000 dólares**. Si no es el mercado principal (HIP-3), además el interés abierto tiene que ser de al menos **500.000 dólares**.
 
-Si el volumen de 24 horas es de menos de **1 millón**, el aviso sale igual, pero marcado `tradable: false` y `label: "vigilancia, no operable"`. A partir de 1 millón va `tradable: true` y `label: "operable"`.
+Si el volumen de 24 horas es de menos de **1 millón**, la fase 1 queda anotada y abre vigilancia, pero no llama al webhook. Va marcada `tradable: false` y `label: "vigilancia, no operable"`. A partir de 1 millón va `tradable: true` y `label: "operable"`, y con la configuración actual la fase 1 sí llama.
 
 Si la mecha de rechazo de la vela que dispara (la de arriba cuando sube, la de abajo cuando baja) ocupa más del **50%** del rango, el aviso lleva `exhaustion_flag: true` y `exhaustion_label: "posible agotamiento"`.
 

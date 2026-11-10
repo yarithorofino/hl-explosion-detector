@@ -212,5 +212,22 @@ class WatchTests(unittest.TestCase):
         self.assertEqual(hit, "sl")
 
 
+class ShadowReportTests(unittest.TestCase):
+    def test_lead_time_and_false_alarm(self):
+        import shadow_report
+
+        hit = {"ts": 1_000_000, "coin": "SOPH", "side": "long", "trigger": "absorption+vol_accel", "price": 100.0}
+        paid = {"SOPH": [(1_000_000 + 3 * 3600, 105.0)]}
+        per = shadow_report.summarise([hit], paid)
+        self.assertEqual(len(per["absorption"]["leads"]), 1)
+        self.assertEqual(len(per["vol_accel"]["leads"]), 1)
+        self.assertAlmostEqual(per["absorption"]["leads"][0], 3.0)
+        failed = {"SOPH": [(1_000_000 + 3600, 95.0)]}
+        per = shadow_report.summarise([hit], failed)
+        self.assertEqual(per["absorption"]["false"], 1)
+        per = shadow_report.summarise([hit], {})
+        self.assertEqual(per["absorption"]["no_path"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

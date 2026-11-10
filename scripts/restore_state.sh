@@ -71,6 +71,8 @@ for rel in listing.stdout.splitlines():
     name = rel.rsplit("/", 1)[-1]
     ok_scan = rel == "data/scans/latest.md" or (
         rel.startswith("data/scans/") and len(name) == 14 and name.endswith(".csv") and name[4] == "-" and name[7] == "-"
+    ) or (
+        rel.startswith("data/shadow/") and len(name) == 14 and name.endswith(".csv") and name[4] == "-" and name[7] == "-"
     )
     if not ok_scan:
         continue

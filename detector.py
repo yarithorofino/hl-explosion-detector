@@ -86,7 +86,22 @@ _CFG_KEYS = (
     "absorption_max_return_pct", "absorption_max_range_pct", "absorption_min_repeats",
     "early_weight_absorption", "early_weight_absorption_repeat",
     "early_rotate_names",
+    "phase1_webhook",
+    "mode_absorption", "mode_vol_accel", "mode_squeeze", "mode_oi", "mode_cvd", "mode_funding",
+    "short_min_day_ntl_usd", "short_hip3_min_oi_usd", "short_funding_min_pct",
+    "shadow_keep_days",
 )
+
+# Early components and the config flag that says shadow or live.
+EARLY_MODES = {
+    "absorption": "mode_absorption",
+    "vol_accel": "mode_vol_accel",
+    "squeeze_breakout": "mode_squeeze",
+    "oi_buildup": "mode_oi",
+    "cvd_absorption": "mode_cvd",
+    "funding_shift": "mode_funding",
+}
+PHASE1_TRIGGERS = {"1h_atr", "1h_legacy", "15m_early", "3h_escalera"}
 _SCAN_HEADERS = (
     "dex", "coin", "15m %", "1h %", "3h %", "24h %", "mult 1h", "vol 24h", "OI",
     "funding %", "ATR %", "suelo", "disparo", "resultado",
@@ -172,13 +187,18 @@ def load_cfg():
         raise RuntimeError("config sin " + ", ".join(missing))
     if not isinstance(cfg["major_coins"], list) or not cfg["major_coins"]:
         raise RuntimeError("config major_coins debe ser una lista con nombres")
+    if cfg["phase1_webhook"] not in ("watch", "tradable", "live"):
+        raise RuntimeError("phase1_webhook debe ser watch, tradable o live")
+    for key in EARLY_MODES.values():
+        if cfg[key] not in ("shadow", "live"):
+            raise RuntimeError(f"{key} debe ser shadow o live")
     return cfg
 
 
 def load_state():
     if not STATE.exists() or STATE.stat().st_size == 0:
         return {"marks": [], "last_fire": {}, "last_fire_escalera": {}, "wakes": {}, "wakes_hour": {},
-                "watches": [], "cvd": {}, "early_cursor": 0}
+                "watches": [], "cvd": {}, "early_cursor": 0, "last_shadow": {}}
     try:
         st = json.loads(STATE.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
@@ -250,10 +270,17 @@ def load_state():
     cursor = st.get("early_cursor")
     if isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0:
         cursor = 0
+    last_shadow = {}
+    for k, v in (st.get("last_shadow") or {}).items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        if v != v or v in (float("inf"), float("-inf")):
+            continue
+        last_shadow[str(k)] = float(v)
     return {
         "marks": marks, "last_fire": last_fire, "last_fire_escalera": last_fire_escalera,
         "wakes": wakes, "wakes_hour": wakes_hour, "watches": watches, "cvd": cvd,
-        "early_cursor": cursor,
+        "early_cursor": cursor, "last_shadow": last_shadow,
     }
 
 
@@ -630,6 +657,85 @@ def _scans_dir():
     return STATE.parent / "scans"
 
 
+def _shadow_dir():
+    return STATE.parent / "shadow"
+
+
+def _take_shadow_rows(st, rows, now, cfg):
+    """One row per coin and trigger set inside the cooldown. Quiet hours are kept."""
+    fresh = []
+    window = float(cfg["cooldown_hours"]) * H
+    seen = st.setdefault("last_shadow", {})
+    for row in rows:
+        key = f"{row['coin']}|{row['trigger']}"
+        prev = seen.get(key)
+        if prev is not None and now - prev < window:
+            continue
+        seen[key] = now
+        fresh.append(row)
+    return fresh
+
+
+def _shadow_markdown(rows):
+    lines = [
+        "### Sombra (calculado, sin webhook)",
+        "",
+    ]
+    if not rows:
+        lines.append("- Sin señales tempranas nuevas en esta pasada.")
+        return "\n".join(lines)
+    lines.append("| coin | lado | disparo | puntos | precio |")
+    lines.append("| --- | --- | --- | --- | --- |")
+    for row in rows:
+        lines.append(
+            "| {coin} | {side} | {trigger} | {score} | {price} |".format(
+                coin=_cell(row["coin"]),
+                side=_cell(row["side"] or "—"),
+                trigger=_cell(row["trigger"]),
+                score=row["score"],
+                price=_fmt(row["price"], 6),
+            )
+        )
+    return "\n".join(lines)
+
+
+def write_shadow(when, day, rows, keep_days):
+    if not rows:
+        return
+    directory = _shadow_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{day}.csv"
+    previous = []
+    if path.exists():
+        previous = path.read_text(encoding="utf-8").splitlines()
+    header = ["ts_madrid", "dex", "coin", "side", "trigger", "score", "components", "price",
+              "day_ntl", "oi_usd", "funding_pct"]
+    import io
+    sio = io.StringIO()
+    writer = csv.writer(sio, lineterminator="\n")
+    writer.writerow(header)
+    if previous:
+        start = 1 if previous[0].startswith("ts_madrid") else 0
+        for line in previous[start:]:
+            if line.strip():
+                sio.write(line + "\n")
+    for row in rows:
+        writer.writerow([
+            when, row["dex"], row["coin"], row["side"], row["trigger"], row["score"],
+            row["components"], _csv_cell(row["price"]), _csv_cell(row["day_ntl"]),
+            _csv_cell(row["oi_usd"]), _csv_cell(row["funding_pct"]),
+        ])
+    atomic_write(path, sio.getvalue())
+    cutoff = datetime.strptime(day, "%Y-%m-%d").date() - timedelta(days=int(keep_days) - 1)
+    for old in directory.glob("*.csv"):
+        try:
+            stamp = datetime.strptime(old.stem, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if stamp < cutoff:
+            old.unlink()
+
+
 def write_scans(when, day, markdown, rows, keep_days):
     directory = _scans_dir()
     directory.mkdir(parents=True, exist_ok=True)
@@ -984,12 +1090,57 @@ def _ingest_cvd(st, coins, now, cfg):
     return stats
 
 
+def _public_alert(alert):
+    return {k: v for k, v in alert.items() if not k.startswith("_")}
+
+
+def _trigger_set(alert):
+    return set((alert.get("trigger") or "").split("+")) - {""}
+
+
+def _wants_webhook(alert, cfg):
+    """Phase-1 posts only when the config says so. Shadow early signals never post."""
+    names = _trigger_set(alert)
+    phase1 = names & PHASE1_TRIGGERS
+    early = names & set(EARLY_MODES)
+    post = False
+    mode = cfg["phase1_webhook"]
+    if phase1 and mode == "live":
+        post = True
+    elif phase1 and mode == "tradable" and alert.get("tradable"):
+        post = True
+    if any(cfg[EARLY_MODES[name]] == "live" for name in early):
+        post = True
+    return post
+
+
+def short_entry_allowed(watch, cfg):
+    """Shorts need a deep book, and funding that is not already paying the shorts."""
+    if watch.get("side") != "short":
+        return True, ""
+    day = _num(watch.get("day_ntl"))
+    if day is None or day < float(cfg["short_min_day_ntl_usd"]):
+        return False, "volumen 24h por debajo de 5M$"
+    dex = watch.get("dex") or "main"
+    if dex != "main":
+        oi = _num(watch.get("oi_usd"))
+        if oi is None or oi < float(cfg["short_hip3_min_oi_usd"]):
+            return False, "OI de HIP-3 por debajo de 1M$"
+    funding = _num(watch.get("funding_pct"))
+    floor = float(cfg["short_funding_min_pct"])
+    if funding is not None and funding <= floor:
+        return False, f"funding {funding} <= {floor}%/h"
+    return True, ""
+
+
 def _entry_payload(watch, nowm):
+    side = watch["side"]
     payload = {
         "type": "entry_ready",
         "coin": watch["coin"],
         "dex": watch.get("dex"),
-        "side": watch["side"],
+        "side": side,
+        "side_label": "largo" if side == "long" else "corto",
         "entry": round(watch["fill"], 8),
         "sl": watch["sl"],
         "tp1": watch["tp1"],
@@ -1072,6 +1223,7 @@ def run_cycle(cfg):
     bars_15 = int(cfg["avg_window_15m"]) + 8
 
     rows = []
+    shadow_rows = []
     pending = []  # alerts that passed a trigger and are not in cooldown
     impulse = {}  # coin -> 1h candles used to build the watch
     extremes = {}
@@ -1132,6 +1284,19 @@ def run_cycle(cfg):
             except Exception as e:
                 log(f"velas 15m {a['coin']}: {e}")
         early = evaluate_early(cs_h, cs_m, a, old, cvd_stats.get(a["coin"]), cfg)
+        if early.get("triggers"):
+            shadow_rows.append({
+                "dex": a.get("dex") or "",
+                "coin": a.get("coin") or "",
+                "side": early.get("side") or "",
+                "trigger": "+".join(early["triggers"]),
+                "score": early.get("score") or 0,
+                "components": "+".join(early["triggers"]),
+                "price": a.get("mark"),
+                "day_ntl": a.get("dayNtlVlm"),
+                "oi_usd": a.get("oi_usd"),
+                "funding_pct": _funding_pct(a),
+            })
         names = trigger_names(view_1h, view_15)
         if early.get("hit"):
             names = names + [n for n in early["triggers"] if n not in names]
@@ -1204,33 +1369,46 @@ def run_cycle(cfg):
         for row in rows:
             if row["coin"] in silenced_coins and row["resultado"] == "alerta":
                 row["resultado"] = "silencio"
+    to_post = [p for p in sendable if _wants_webhook(p, cfg)]
+    watch_only = [p for p in sendable if not _wants_webhook(p, cfg)]
     logged = []
     if pending and not sendable:
         status = "quiet_hours_logged"
         logged = pending
-    elif sendable:
+    elif to_post:
         capped = day_n >= cfg["max_alerts_per_day"] or hour_n >= cfg["max_alerts_per_hour"]
         if capped:
             status = "hourly_cap_logged" if hour_n >= cfg["max_alerts_per_hour"] else "daily_cap_logged"
             for row in rows:
-                if row["resultado"] == "alerta":
+                if row["resultado"] == "alerta" and row["coin"] in {p["coin"] for p in to_post}:
                     row["resultado"] = "tope"
+            logged = to_post
         else:
-            status = send([{k: v for k, v in p.items() if not k.startswith("_")} for p in sendable], cfg)
+            status = send([_public_alert(p) for p in to_post], cfg)
             if status in ("posted", "dry_run"):
                 st["wakes"][today] = day_n + 1
                 st["wakes_hour"][hour_key] = hour_n + 1
-                for p in sendable:
-                    kinds = set((p.get("trigger") or "").split("+"))
+                for p in to_post:
+                    kinds = _trigger_set(p)
                     if kinds - {"3h_escalera"}:
                         st["last_fire"][p["coin"]] = now
                     if "3h_escalera" in kinds:
                         st["last_fire_escalera"][p["coin"]] = now
-                sent_n = len(sendable) if status == "posted" else 0
-                counted = len(sendable)
-            else:
-                counted = 0
-        logged = sendable
+                sent_n = len(to_post) if status == "posted" else 0
+                counted = len(to_post)
+            logged = to_post
+    if watch_only:
+        if status == "none":
+            status = "watch_only"
+        for p in watch_only:
+            kinds = _trigger_set(p)
+            # A shadow-only early signal must not block a later explosion.
+            if kinds & PHASE1_TRIGGERS:
+                if kinds - {"3h_escalera"}:
+                    st["last_fire"][p["coin"]] = now
+                if "3h_escalera" in kinds:
+                    st["last_fire_escalera"][p["coin"]] = now
+        logged = logged + watch_only
     if logged:
         append_jsonl(ALERTS, {
             "at": nowm.isoformat(timespec="seconds"), "status": status,
@@ -1245,6 +1423,7 @@ def run_cycle(cfg):
             )
     # Phase 2 reads watches opened on earlier scans. New watches are added after,
     # so the impulse bar itself is not treated as the retest.
+    assets_by_coin = {a["coin"]: a for a in assets}
     allow_entry = not (quiet and cfg.get("entry_ready_respect_quiet_hours", True))
     entry_payloads = []
     kept = []
@@ -1261,9 +1440,26 @@ def run_cycle(cfg):
             high = low = close = mark
         else:
             high = low = close = None
+        book = assets_by_coin.get(w["coin"])
+        if book:
+            w["day_ntl"] = book.get("dayNtlVlm")
+            w["oi_usd"] = book.get("oi_usd")
+            w["funding_pct"] = _funding_pct(book)
+            if book.get("dex"):
+                w["dex"] = book.get("dex")
         w, event = watchmod.advance_watch(w, high, low, close, now, cfg, allow_entry=allow_entry)
         if event == "entry_ready":
-            entry_payloads.append(_entry_payload(w, nowm))
+            ok_short, why = short_entry_allowed(w, cfg)
+            if not ok_short:
+                w["status"] = "open"
+                for key in ("fill", "rr", "entry_sent_at"):
+                    w.pop(key, None)
+                if w.get("short_block") != why:
+                    log(f"corto no enviado {w['coin']}: {why}")
+                    w["short_block"] = why
+            else:
+                w.pop("short_block", None)
+                entry_payloads.append(_entry_payload(w, nowm))
         if event == "quiet" and not w.get("quiet_noted"):
             log(f"entrada en silencio {w['coin']} {w['side']}")
             w["quiet_noted"] = True
@@ -1295,6 +1491,9 @@ def run_cycle(cfg):
             built = watchmod.build_watch(alert["coin"], alert.get("dex"), side, alert.get("trigger"), bars, now, cfg)
         if not built:
             continue
+        built["day_ntl"] = alert.get("dayNtlVlm")
+        built["oi_usd"] = alert.get("oi_usd")
+        built["funding_pct"] = alert.get("funding_pct")
         if existing and existing.get("kind") == "absorption":
             # A later spike in the same campaign widens the range and restarts the clock.
             built["created_at"] = existing.get("created_at", now)
@@ -1322,6 +1521,8 @@ def run_cycle(cfg):
     st["last_fire_escalera"] = {
         k: v for k, v in st["last_fire_escalera"].items() if now - v < cooldown_s
     }
+    fresh_shadow = _take_shadow_rows(st, shadow_rows, now, cfg)
+    st["last_shadow"] = {k: v for k, v in st["last_shadow"].items() if now - v < cooldown_s}
     atomic_write(STATE, json.dumps(st, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
 
     when = nowm.strftime("%Y-%m-%d %H:%M")
@@ -1329,10 +1530,15 @@ def run_cycle(cfg):
     markdown = render_scan_markdown(
         when, mode, snap.get("count"), len(ranked), n_series, len(pending), sent_n, status, rows,
     )
+    markdown += "\n" + _shadow_markdown(fresh_shadow)
+    if entry_payloads:
+        sent = ", ".join(f"{p['coin']} {p['side_label']}" for p in entry_payloads)
+        markdown += f"\n\n- `entry_ready` enviado en esta pasada: {sent}"
     print(markdown, flush=True)
     write_summary(markdown.splitlines())
     try:
         write_scans(when, today, markdown, rows, cfg["scan_keep_days"])
+        write_shadow(when, today, fresh_shadow, cfg["shadow_keep_days"])
     except Exception as e:
         log(f"no se pudo escribir el historial de scans: {e}")
     line = (
