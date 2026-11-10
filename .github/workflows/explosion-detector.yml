@@ -20,7 +20,7 @@ on:
       iterations:
         description: "Número de pasadas (la prueba del webhook ignora esto y hace 1)"
         required: false
-        default: 4
+        default: 5
         type: number
 
 # No se cancela la ejecución que está a punto de guardar el estado.
@@ -60,6 +60,6 @@ jobs:
           EXPLOSION_WEBHOOK_URL: ${{ secrets.EXPLOSION_WEBHOOK_URL }}
           EXPLOSION_WEBHOOK_AUTH: ${{ secrets.EXPLOSION_WEBHOOK_AUTH }}
           FORCE_TEST_POST: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.force_test_post == 'true' || inputs.force_test_post == true) && 'true' || 'false' }}
-          SCAN_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.iterations || '4' }}
+          SCAN_ITERATIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.iterations || '5' }}
           PYTHONUNBUFFERED: "1"
         run: bash scripts/scan_loop.sh
