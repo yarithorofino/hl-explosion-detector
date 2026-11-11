@@ -1665,12 +1665,24 @@ def run_cycle(cfg):
             if not got:
                 continue
             mark = asset.get("mark")
-            if mark:
+            if mark and got.get("managed") == "structural":
                 rr = watchmod.reward_risk(got["side"], mark, got["sl"], got["tp1"])
                 if rr is None or rr < float(cfg["watch_rr_min"]):
                     continue
                 got["entry"] = mark
                 got["rr"] = round(rr, 2)
+            elif mark and got.get("managed") == "chandelier":
+                # The trail is the exit. A mark through the stop is not a trade;
+                # a mark still beyond the stop keeps the planned risk.
+                if got["side"] == "long" and mark <= got["sl"]:
+                    continue
+                if got["side"] == "short" and mark >= got["sl"]:
+                    continue
+                risk = abs(mark - got["sl"])
+                got["entry"] = mark
+                got["partial_tp"] = mark + 2 * risk if got["side"] == "long" else mark - 2 * risk
+                got["tp1"] = got["partial_tp"]
+                got["rr"] = 2.0
             got["detected_at_madrid"] = nowm.strftime("%Y-%m-%d %H:%M")
             st["last_setup"][coin] = now
             if quiet:

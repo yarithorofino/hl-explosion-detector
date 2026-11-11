@@ -20,14 +20,14 @@ MADRID = ZoneInfo("Europe/Madrid")
 ROOT = Path(__file__).resolve().parent
 CACHE = Path("/tmp/hl-setup")
 OUT = ROOT / "reports" / "setup_backtest_2026-11-11.md"
-EVAL_FROM = datetime(2026, 10, 28, tzinfo=timezone.utc)
+EVAL_FROM = datetime(2026, 10, 12, tzinfo=timezone.utc)
 EVAL_TO = datetime(2026, 11, 12, tzinfo=timezone.utc)
-FETCH_FROM = datetime(2026, 10, 18, tzinfo=timezone.utc)
+FETCH_FROM = datetime(2026, 9, 20, tzinfo=timezone.utc)
 
 
 def fetch(coin, start_ms, end_ms):
     CACHE.mkdir(parents=True, exist_ok=True)
-    path = CACHE / f"{coin.replace(':', '_')}_1h.json"
+    path = CACHE / f"{coin.replace(':', '_')}_1h_{start_ms}.json"
     if path.exists():
         return json.loads(path.read_text())
     data = post({
@@ -43,18 +43,23 @@ def fetch(coin, start_ms, end_ms):
 def universe():
     meta, ctxs = post({"type": "metaAndAssetCtxs"})
     names = []
+    listed = below = 0
     for u, c in zip(meta["universe"], ctxs):
         if u.get("isDelisted"):
             continue
+        listed += 1
         try:
             day = float(c.get("dayNtlVlm") or 0)
         except (TypeError, ValueError):
             day = 0
         if day >= 1_000_000:
             names.append(u["name"])
-    if "GRAM" not in names:
+        else:
+            below += 1
+    forced = "GRAM" not in names
+    if forced:
         names.append("GRAM")
-    return sorted(set(names))
+    return sorted(set(names)), {"listed": listed, "below_1m": below, "at_least_1m": listed - below, "gram_added": forced}
 
 
 def asset_for(coin):
@@ -84,15 +89,15 @@ def rose_on(cs, day):
     }
 
 
-def replay_coin(cs, cfg):
-    """Closed trades whose entry bar is inside the 14-day window."""
+def replay_coin(cs, cfg, counts):
+    """Closed trades whose entry bar is inside the window. `counts` collects filter rejections."""
     trades = []
-    signals = []
     start_ms = EVAL_FROM.timestamp() * 1000
     end_ms = EVAL_TO.timestamp() * 1000
     need = int(cfg["setup_ema_slow"]) + 2
     i = need
     coin = cs[0].get("s") or ""
+    busy_until = -1
     while i < len(cs) - 1:
         if cs[i]["t"] < start_ms or cs[i]["t"] >= end_ms:
             i += 1
@@ -101,8 +106,11 @@ def replay_coin(cs, cfg):
         day = sum(setups.bar_notional(c) or 0 for c in window)
         asset = asset_for(coin)
         asset["dayNtlVlm"] = day
+        _sig, reason = setups.inspect_breakout(cs[:i + 1], i, asset, cfg)
+        if reason != "quiet":
+            counts["breakout:" + reason] += 1
         got = setups.evaluate(cs[:i + 1], i, asset, cfg)
-        if not got:
+        if i <= busy_until or not got:
             i += 1
             continue
         risk = abs(got["entry"] - got["initial_sl"])
@@ -112,8 +120,8 @@ def replay_coin(cs, cfg):
         if not walked:
             i += 1
             continue
-        exit_i, exit_px = walked
-        net = setups.net_trade(got["entry"], exit_px, risk, got["side"])
+        exit_i, exit_px, partial = walked
+        net = setups.net_managed(got["entry"], exit_px, risk, got["side"], partial)
         if net is None:
             i += 1
             continue
@@ -127,8 +135,8 @@ def replay_coin(cs, cfg):
             "coin": asset["coin"],
         }
         trades.append(trade)
-        signals.append(trade)
-        i = max(exit_i, i + 1)
+        busy_until = exit_i
+        i += 1
     return trades
 
 
@@ -157,49 +165,38 @@ def summarise(trades):
     }
 
 
-def gram_near_misses(cs, cfg):
-    """Hours where the Donchian rules held and the structural R:R did not."""
+def coin_breakouts(cs, cfg, coin, days):
+    """Donchian hours on the named days: taken, or the filter that stopped them."""
     out = []
-    asset = asset_for("GRAM")
-    asset["dayNtlVlm"] = 5_000_000
+    asset = asset_for(coin)
     need = int(cfg["setup_ema_slow"]) + 2
     for i, c in enumerate(cs):
-        if i < need:
+        if i < need or day_key(c["t"]) not in days:
             continue
-        if day_key(c["t"]) not in ("2026-11-09", "2026-11-10"):
+        window = cs[max(0, i - 23):i + 1]
+        asset["dayNtlVlm"] = sum(setups.bar_notional(b) or 0 for b in window)
+        _got, reason = setups.inspect_breakout(cs[:i + 1], i, asset, cfg)
+        if reason == "quiet":
             continue
-        cl = setups.closes(cs[:i + 1])
-        fast, slow = setups.ema_series(cl, 20), setups.ema_series(cl, 50)
-        hi = setups._donchian(cs, i, 20, "high")
-        if not cl or fast[i] is None or slow[i] is None or hi is None:
-            continue
-        if not (cl[i] > hi and fast[i] > slow[i] and setups._volume_ok(cs, i, 1.5, 20)):
-            continue
-        got = setups.trend_breakout(cs[:i + 1], i, asset, cfg)
-        if got:
-            continue
-        import watch
-        price = cl[i]
-        atrs = setups.wilder_atr(cs[:i + 1], int(cfg["atr_period"]))
-        swing = setups.last_swing(cs, i, int(cfg["swing_wing"]), "low")
-        sl = setups._stop("long", price, atrs[i], swing, cfg["setup_atr_mult"])
-        tp1, _tp2 = watch.structural_targets(cs[:i + 1], "long", price)
-        rr = watch.reward_risk("long", price, sl, tp1)
         out.append({
             "when": datetime.fromtimestamp(c["t"] / 1000, MADRID).strftime("%m-%d %H:%M"),
-            "price": price, "tp1": tp1, "rr": rr,
+            "price": float(c["c"]),
+            "reason": reason,
+            "day_ntl": asset["dayNtlVlm"],
         })
     return out
 
 
-def write(per_type, gram, risers, n_coins):
+def write(per_type, gram, lit, risers, n_coins, meta, counts, span):
     lines = []
     a = lines.append
-    a("# Preparaciones, 28 oct – 11 nov 2026")
+    a("# Preparaciones, repetición hasta el 11 nov 2026")
     a("")
-    a("Velas de 1 hora. Una posición por nombre: el stop inicial hasta +1R, después el Chandelier de 3 ATR, que solo aprieta. Comisión taker de Hyperliquid 0,045% por lado (0,09% ida y vuelta), restada del resultado. Esto es un estudio, no una promesa. El cupo de 6 al día del directo no se aplica aquí: se quiere ver la regla, no el freno.")
+    a("Una ruptura o un retroceso no tiene objetivo fijo: sale en el stop inicial y, desde +1R, en el Chandelier de 3 ATR. La mitad se puede cerrar en +2R. Solo se veta si el máximo o mínimo de 24h o de 7 días, medido en velas de 4 horas ya cerradas, queda a menos de 1R de la entrada. El retest de soporte sigue exigiendo el primer nivel real y un R:R de 2. Comisión taker de Hyperliquid 0,045% por lado. El cupo de 6 al día no se aplica aquí.")
     a("")
-    a(f"Nombres con volumen 24h actual de al menos 1M$ (más GRAM si no entraba): **{n_coins}**. En cada vela el filtro de libro usa la suma de las 24 horas anteriores. Un corto pide 5M$ en esa suma. El interés abierto de HIP-3 no está en las velas, así que ese filtro no se aplica aquí.")
+    a(f"Ventana de las velas pedidas: {span}. Perps listados (sin spot, sin delistados): **{meta['listed']}**. Por debajo de 1M$ de volumen 24h actual: **{meta['below_1m']}**. En el universo: **{meta['at_least_1m']}**" + (" más GRAM, que hoy no llegaba al millón." if meta["gram_added"] else "."))
+    a(f"Nombres con velas suficientes para la EMA50: **{n_coins}**. Con historia corta (se saltan): **{meta.get('short_history', 0)}**.")
+    a("En cada vela el filtro de libro usa la suma de las 24 horas anteriores. Un corto pide 5M$ en esa suma. El interés abierto de HIP-3 no está en las velas.")
     a("")
     a("| Tipo | Operaciones | Acierto | Esperanza neta (R) | Esperanza neta (%) | Racha de pérdidas | Horas medias |")
     a("| --- | --- | --- | --- | --- | --- | --- |")
@@ -215,8 +212,25 @@ def write(per_type, gram, risers, n_coins):
             f"| {labels[key]} | {s['n']} | {s['win']:.1f}% | {s['exp_r']:.3f} | {s['exp_pct']:.3f}% | "
             f"{s['streak']} | {s['hold']:.1f} |"
         )
-    all_trades = []
-    # per_type here is stats; caller also passes nothing else. Recomputed by caller in the table only.
+    a("")
+    a("## Qué filtro paró las rupturas de canal")
+    a("")
+    a("Solo cuentan las velas que cerraron fuera del canal de 20 horas. El resto no es una ruptura y no entra en esta tabla. Aceptadas es una vela que pasa los filtros. Si ese nombre ya tiene una posición abierta, no se abre otra: por eso hay menos operaciones que velas aceptadas.")
+    a("")
+    a("| Filtro | Velas |")
+    a("| --- | --- |")
+    labels = {
+        "breakout:short_history": "Historia corta (EMA50 o Donchian)",
+        "breakout:ema": "Ruptura con la EMA20 del lado contrario",
+        "breakout:volume": "Volumen por debajo de 1,5× la media de 20",
+        "breakout:book_1m": "Libro de 24h por debajo de 1M$ (largo)",
+        "breakout:book_5m": "Libro de 24h por debajo de 5M$ (corto)",
+        "breakout:atr": "ATR o stop no calculable",
+        "breakout:major_level": "Máximo o mínimo de 24h/7d a menos de 1R",
+        "breakout:taken": "Aceptadas",
+    }
+    for key, label in labels.items():
+        a(f"| {label} | {counts.get(key, 0)} |")
     a("")
     a("## GRAM, 9–10 nov")
     a("")
@@ -232,14 +246,29 @@ def write(per_type, gram, risers, n_coins):
                     f"salida {t['exit']:.4g} resultado {t['net_r']:.2f}R ({t['net_pct']:.2f}%)"
                 )
         else:
-            a("La regla no abrió ninguna preparación en GRAM entre el 9 y el 10 nov.")
-        if gram.get("misses"):
+            a("Ninguna preparación de GRAM quedó abierta entre el 9 y el 10 nov.")
+        if gram.get("breaks"):
             a("")
-            a("Horas en las que la ruptura de 20 velas, la media de 20 por encima de la de 50 y el volumen sí se cumplían, y el R:R hasta el primer nivel no llegaba a 2:")
-            for m in gram["misses"]:
-                rr = "sin nivel" if m["rr"] is None else f"{m['rr']:.2f}"
-                tp = "—" if m["tp1"] is None else f"{m['tp1']:.4g}"
-                a(f"- {m['when']} precio {m['price']:.4g}, TP1 {tp}, R:R {rr}")
+            a("Horas del 9 y el 10 en las que el cierre salió del canal de 20. El motivo es el filtro que paró esa vela, o `taken` si entró:")
+            for m in gram["breaks"]:
+                a(f"- {m['when']} precio {m['price']:.4g}, libro 24h {m['day_ntl']/1e6:.2f}M$, {m['reason']}")
+    a("")
+    a("## LIT, 10 nov")
+    a("")
+    if not lit:
+        a("No hay velas de LIT.")
+    else:
+        a(f"Movimiento del 10 nov: {lit['move']}")
+        if lit["trades"]:
+            for t in lit["trades"]:
+                when = datetime.fromtimestamp(t["t"] / 1000, MADRID).strftime("%m-%d %H:%M")
+                a(f"- {when} {t['setup']} {t['side']} {t['net_r']:.2f}R")
+        else:
+            a("LIT no abrió una preparación ese día.")
+        if lit.get("breaks"):
+            a("Rupturas de canal el 10 nov:")
+            for m in lit["breaks"]:
+                a(f"- {m['when']} precio {m['price']:.4g}, libro {m['day_ntl']/1e6:.2f}M$, {m['reason']}")
     a("")
     a("## Nombres que subieron más de un 6% el 10 nov")
     a("")
@@ -261,10 +290,13 @@ def main():
     cfg = load_cfg()
     start = int(FETCH_FROM.timestamp() * 1000)
     end = int(EVAL_TO.timestamp() * 1000)
-    names = universe()
-    print(f"universe {len(names)}", flush=True)
+    names, meta = universe()
+    print(f"universe {len(names)} listed {meta['listed']} below_1m {meta['below_1m']}", flush=True)
     by_type = defaultdict(list)
+    counts = defaultdict(int)
     store = {}
+    short_history = 0
+    span = "sin velas"
     for i, coin in enumerate(names):
         try:
             cs = fetch(coin, start, end)
@@ -272,17 +304,26 @@ def main():
             print("skip", coin, exc, flush=True)
             continue
         if len(cs) < int(cfg["setup_ema_slow"]) + 10:
+            short_history += 1
             continue
         if not cs[0].get("s"):
             for c in cs:
                 c["s"] = coin
-        trades = replay_coin(cs, cfg)
+        if span == "sin velas":
+            span = (
+                datetime.fromtimestamp(cs[0]["t"] / 1000, timezone.utc).strftime("%Y-%m-%d")
+                + " → "
+                + datetime.fromtimestamp(cs[-1]["t"] / 1000, timezone.utc).strftime("%Y-%m-%d")
+                + f" ({len(cs)} velas de 1h en el primer nombre)"
+            )
+        trades = replay_coin(cs, cfg, counts)
         for t in trades:
             t["coin"] = coin
             by_type[t["setup"]].append(t)
         store[coin] = (cs, trades)
         if (i + 1) % 10 == 0:
             print(f"replayed {i+1}/{len(names)}", flush=True)
+    meta["short_history"] = short_history
     per_type = {k: summarise(v) for k, v in by_type.items()}
     for key in ("trend_breakout", "trend_pullback", "support_retest"):
         per_type.setdefault(key, summarise([]))
@@ -299,7 +340,16 @@ def main():
         gram = {
             "move": "sin rango" if not move else f"{move['close_pct']:.1f}% (máximo {move['high_pct']:.1f}%)",
             "trades": window,
-            "misses": gram_near_misses(gram_cs, cfg),
+            "breaks": coin_breakouts(gram_cs, cfg, "GRAM", {"2026-11-09", "2026-11-10"}),
+        }
+    lit = None
+    lit_cs, lit_tr = store.get("LIT", (None, []))
+    if lit_cs:
+        move = rose_on(lit_cs, "2026-11-10")
+        lit = {
+            "move": "sin rango" if not move else f"{move['close_pct']:.1f}% (máximo {move['high_pct']:.1f}%)",
+            "trades": [t for t in lit_tr if day_key(t["t"]) == "2026-11-10"],
+            "breaks": coin_breakouts(lit_cs, cfg, "LIT", {"2026-11-10"}),
         }
     risers = []
     for coin, (cs, trades) in store.items():
@@ -317,7 +367,7 @@ def main():
             "caught": ", ".join(t["setup"] for t in caught) if caught else "no",
         })
     risers.sort(key=lambda r: r["close_pct"], reverse=True)
-    write(per_type, gram, risers, len(names))
+    write(per_type, gram, lit, risers, len(store), meta, counts, span)
 
 
 if __name__ == "__main__":

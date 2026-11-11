@@ -21,9 +21,14 @@ Support retest (long only)
   are rising. A sequence of lower 1h highs whose latest high is still
   below TP1 vetoes the long: the path to the target is already failing.
 
-TP1 and TP2 are the first two structural levels in front of the price
-(the same rule as entry_ready). The alert exists only when the reward
-from the current price to TP1 is at least twice the risk to the initial stop.
+A trend trade has no fixed structural target. It exits at the initial
+stop, then at the Chandelier once the trade is up one R. Half can come
+off at 2R. The only ceiling is a major high or low: the 24h or 7d
+extreme of the completed 4h candles, and only when that level sits
+within one R of the entry.
+
+A support retest still uses the entry_ready rule: TP1 is the first
+structural level, and the alert exists only when that level pays 2R.
 """
 import watch as watchmod
 
@@ -254,28 +259,57 @@ def _short_ok(asset, cfg):
     return ok
 
 
-def _build(cs, end, side, kind, asset, cfg):
-    price = _f(cs[end].get("c"))
-    atrs = wilder_atr(cs[:end + 1], int(cfg["atr_period"]))
-    if price is None or not atrs or atrs[end] is None:
-        return None
-    wing = int(cfg["swing_wing"])
-    swing = last_swing(cs, end, wing, "low" if side == "long" else "high")
-    sl = _stop(side, price, atrs[end], swing, cfg["setup_atr_mult"])
-    tp1, tp2 = watchmod.structural_targets(
-        cs[:end + 1], side, price, wing=wing, day_bars=int(cfg["avg_window_hours"]),
-    )
-    if sl is None or tp1 is None:
-        return None
-    if kind == "support_retest" and lower_high_veto(cs, end, tp1):
-        return None
-    rr = watchmod.reward_risk(side, price, sl, tp1)
-    if rr is None or rr < float(cfg["watch_rr_min"]):
-        return None
+def completed_four_hour(cs, end):
+    """4h highs and lows from the hourly bars. The bucket that holds `end` is dropped if it is short."""
+    buckets = {}
+    for c in cs[:end + 1]:
+        t = c.get("t") or 0
+        key = t // (4 * 3_600_000)
+        row = buckets.setdefault(key, {"h": None, "l": None, "n": 0})
+        h, lo = _f(c.get("h")), _f(c.get("l"))
+        if h is not None:
+            row["h"] = h if row["h"] is None else max(row["h"], h)
+        if lo is not None:
+            row["l"] = lo if row["l"] is None else min(row["l"], lo)
+        row["n"] += 1
+    full = [buckets[k] for k in sorted(buckets) if buckets[k]["n"] >= 4]
+    return full
+
+
+def major_level_within_1r(cs, end, side, price, risk):
+    """24h or 7d extreme of completed 4h candles, in front of the trade and closer than 1R.
+
+    Returns (blocked, detail). A breakout that has already cleared that extreme is not blocked.
+    """
+    price, risk = _f(price), _f(risk)
+    if price is None or risk is None or risk <= 0 or side not in ("long", "short"):
+        return False, None
+    bars = completed_four_hour(cs, end)
+    if not bars:
+        return False, None
+    kind = "h" if side == "long" else "l"
+    for name, n in (("24h", 6), ("7d", 42)):
+        window = bars[-n:]
+        vals = [b[kind] for b in window if b[kind] is not None]
+        if not vals:
+            continue
+        level = max(vals) if side == "long" else min(vals)
+        gap = (level - price) if side == "long" else (price - level)
+        if gap > 0 and gap < risk:
+            return True, {"window": name, "level": level, "gap_r": gap / risk}
+    return False, None
+
+
+def _payload(cs, end, side, kind, asset, cfg, price, sl, atr, tp1, tp2, rr, managed):
     conf, reasons = _confidence(asset, cfg)
+    risk = abs(price - sl)
+    partial = None
+    if managed == "chandelier" and risk > 0:
+        partial = price + 2 * risk if side == "long" else price - 2 * risk
     return {
         "type": "setup",
         "setup": kind,
+        "managed": managed,
         "coin": (asset or {}).get("coin"),
         "dex": (asset or {}).get("dex") or "main",
         "side": side,
@@ -283,40 +317,87 @@ def _build(cs, end, side, kind, asset, cfg):
         "entry": price,
         "sl": sl,
         "initial_sl": sl,
-        "tp1": tp1,
-        "tp2": tp2 if tp2 is not None else tp1,
-        "rr": round(rr, 2),
+        "tp1": partial if managed == "chandelier" else tp1,
+        "tp2": tp2 if tp2 is not None else (partial if managed == "chandelier" else tp1),
+        "partial_tp": partial,
+        "rr": 2.0 if managed == "chandelier" else round(rr, 2),
         "trigger": kind,
         "trail_rule": TRAIL_RULE,
         "confidence": conf,
         "confidence_notes": reasons,
         "funding_pct": (asset or {}).get("funding_pct"),
         "premium_pct": (asset or {}).get("premium_pct"),
-        "atr": atrs[end],
+        "atr": atr,
     }
 
 
+def _build(cs, end, side, kind, asset, cfg):
+    price = _f(cs[end].get("c"))
+    atrs = wilder_atr(cs[:end + 1], int(cfg["atr_period"]))
+    if price is None or not atrs or atrs[end] is None:
+        return None, "atr"
+    wing = int(cfg["swing_wing"])
+    swing = last_swing(cs, end, wing, "low" if side == "long" else "high")
+    sl = _stop(side, price, atrs[end], swing, cfg["setup_atr_mult"])
+    if sl is None:
+        return None, "atr"
+    risk = abs(price - sl)
+    if risk <= 0:
+        return None, "atr"
+    if kind in ("trend_breakout", "trend_pullback"):
+        blocked, _detail = major_level_within_1r(cs, end, side, price, risk)
+        if blocked:
+            return None, "major_level"
+        return _payload(cs, end, side, kind, asset, cfg, price, sl, atrs[end], None, None, None, "chandelier"), None
+    tp1, tp2 = watchmod.structural_targets(
+        cs[:end + 1], side, price, wing=wing, day_bars=int(cfg["avg_window_hours"]),
+    )
+    if tp1 is None:
+        return None, "retest_no_level"
+    if lower_high_veto(cs, end, tp1):
+        return None, "retest_lower_highs"
+    rr = watchmod.reward_risk(side, price, sl, tp1)
+    if rr is None or rr < float(cfg["watch_rr_min"]):
+        return None, "retest_rr"
+    return _payload(cs, end, side, kind, asset, cfg, price, sl, atrs[end], tp1, tp2, rr, "structural"), None
+
+
 def trend_breakout(cs, end, asset, cfg):
+    got, _reason = inspect_breakout(cs, end, asset, cfg)
+    return got
+
+
+def inspect_breakout(cs, end, asset, cfg):
+    """Return (signal or None, filter). `quiet` means the bar is not a channel break."""
     period = int(cfg["setup_donchian"])
     fast_n, slow_n = int(cfg["setup_ema_fast"]), int(cfg["setup_ema_slow"])
     cl = closes(cs[:end + 1])
     if cl is None or end < max(period, slow_n):
-        return None
+        return None, "short_history"
     fast, slow = ema_series(cl, fast_n), ema_series(cl, slow_n)
     if not fast or not slow or fast[end] is None or slow[end] is None:
-        return None
-    if not _volume_ok(cs, end, cfg["setup_vol_mult"], period):
-        return None
+        return None, "short_history"
     close = cl[end]
     hi = _donchian(cs, end, period, "high")
     lo = _donchian(cs, end, period, "low")
-    if hi is not None and close > hi and fast[end] > slow[end]:
-        if _passes_book(asset, "long", cfg):
-            return _build(cs, end, "long", "trend_breakout", asset, cfg)
-    if lo is not None and close < lo and fast[end] < slow[end]:
-        if _passes_book(asset, "short", cfg):
-            return _build(cs, end, "short", "trend_breakout", asset, cfg)
-    return None
+    long_break = hi is not None and close > hi and fast[end] > slow[end]
+    short_break = lo is not None and close < lo and fast[end] < slow[end]
+    # A close beyond the channel with the EMA on the wrong side is its own bucket.
+    long_raw = hi is not None and close > hi
+    short_raw = lo is not None and close < lo
+    if not long_raw and not short_raw:
+        return None, "quiet"
+    side = "long" if long_raw and not short_raw else "short" if short_raw and not long_raw else ("long" if long_break else "short")
+    if (side == "long" and not long_break) or (side == "short" and not short_break):
+        return None, "ema"
+    if not _volume_ok(cs, end, cfg["setup_vol_mult"], period):
+        return None, "volume"
+    if not _passes_book(asset, side, cfg):
+        return None, "book_5m" if side == "short" else "book_1m"
+    got, reason = _build(cs, end, side, "trend_breakout", asset, cfg)
+    if got:
+        return got, "taken"
+    return None, reason or "atr"
 
 
 def trend_pullback(cs, end, asset, cfg):
@@ -340,12 +421,20 @@ def trend_pullback(cs, end, asset, cfg):
     vals_hi = [_f(c.get("h")) for c in cs[:end + 1]]
     if fast[end] > slow[end]:
         lows = _swing_indexes(vals_lo, wing, "low")
-        if len(lows) >= 2 and vals_lo[lows[-1]] > vals_lo[lows[-2]] and _passes_book(asset, "long", cfg):
-            return _build(cs, end, "long", "trend_pullback", asset, cfg)
-    elif fast[end] < slow[end]:
+        if not (len(lows) >= 2 and vals_lo[lows[-1]] > vals_lo[lows[-2]]):
+            return None
+        if not _passes_book(asset, "long", cfg):
+            return None
+        got, _reason = _build(cs, end, "long", "trend_pullback", asset, cfg)
+        return got
+    if fast[end] < slow[end]:
         highs = _swing_indexes(vals_hi, wing, "high")
-        if len(highs) >= 2 and vals_hi[highs[-1]] < vals_hi[highs[-2]] and _passes_book(asset, "short", cfg):
-            return _build(cs, end, "short", "trend_pullback", asset, cfg)
+        if not (len(highs) >= 2 and vals_hi[highs[-1]] < vals_hi[highs[-2]]):
+            return None
+        if not _passes_book(asset, "short", cfg):
+            return None
+        got, _reason = _build(cs, end, "short", "trend_pullback", asset, cfg)
+        return got
     return None
 
 
@@ -370,8 +459,9 @@ def support_retest(cs, end, asset, cfg):
         return None
     if not rising(four_hour_lows(cs, end), 3):
         return None
-    # TP1 is decided inside _build; the veto runs there once TP1 is known.
-    return _build(cs, end, "long", "support_retest", asset, cfg)
+    # TP1 is decided inside _build; the lower-high veto and the 2R test run there.
+    got, _reason = _build(cs, end, "long", "support_retest", asset, cfg)
+    return got
 
 
 def evaluate(cs, end, asset, cfg):
@@ -397,12 +487,13 @@ def net_trade(entry, exit_price, risk, side, fee_pct_per_side=FEE_PCT_PER_SIDE):
 
 
 def simulate(cs, entry_index, side, stop, atr_mult_trail, risk, atr_at):
-    """Walk forward. Stop is checked before the trail updates. Returns exit index and price.
+    """Walk forward. Stop is checked before the trail updates.
 
-    The Chandelier uses the running best price and the ATR frozen at entry
-    (the trail width is known when the trade is planned). It only replaces
-    the initial stop after price has traded one R in favor, and it never
-    loosens.
+    Returns (exit_index, exit_price, partial_price or None). Half the
+    position is marked at +2R when that price trades, and the other half
+    follows the Chandelier. The trail uses ATR frozen at entry. It replaces
+    the initial stop only after +1R, and it never loosens. A bar that hits
+    the stop and the target is treated as a stop.
     """
     entry = _f(cs[entry_index].get("c"))
     if entry is None or risk is None or risk <= 0:
@@ -410,26 +501,49 @@ def simulate(cs, entry_index, side, stop, atr_mult_trail, risk, atr_at):
     best = entry
     stop_now = stop
     armed = False
+    partial = None
     trail_width = float(atr_mult_trail) * atr_at
+    target = entry + 2 * risk if side == "long" else entry - 2 * risk
     for i in range(entry_index + 1, len(cs)):
         h, l, o = _f(cs[i].get("h")), _f(cs[i].get("l")), _f(cs[i].get("o"))
         if None in (h, l, o):
             continue
         if side == "long" and l <= stop_now:
-            return i, stop_now if o >= stop_now else o
+            return i, stop_now if o >= stop_now else o, partial
         if side == "short" and h >= stop_now:
-            return i, stop_now if o <= stop_now else o
+            return i, stop_now if o <= stop_now else o, partial
         if side == "long":
+            if partial is None and h >= target:
+                partial = target
             best = max(best, h)
             if best - entry >= risk:
                 armed = True
             if armed:
                 stop_now = max(stop_now, best - trail_width)
         else:
+            if partial is None and l <= target:
+                partial = target
             best = min(best, l)
             if entry - best >= risk:
                 armed = True
             if armed:
                 stop_now = min(stop_now, best + trail_width)
     last = _f(cs[-1].get("c"))
-    return len(cs) - 1, last
+    return len(cs) - 1, last, partial
+
+
+def net_managed(entry, exit_price, risk, side, partial=None, fee_pct_per_side=FEE_PCT_PER_SIDE):
+    """Net R and percent. A partial books half at +2R and half at the trail exit. Fees once."""
+    entry, exit_price, risk = _f(entry), _f(exit_price), _f(risk)
+    if not entry or exit_price is None or not risk or risk <= 0 or side not in ("long", "short"):
+        return None
+    sign = 1 if side == "long" else -1
+    if partial is None:
+        gross_r = (exit_price - entry) / risk * sign
+        gross_pct = (exit_price / entry - 1) * 100 * sign
+    else:
+        gross_r = 0.5 * ((partial - entry) / risk * sign) + 0.5 * ((exit_price - entry) / risk * sign)
+        gross_pct = 0.5 * ((partial / entry - 1) * 100 * sign) + 0.5 * ((exit_price / entry - 1) * 100 * sign)
+    fee_pct = 2 * float(fee_pct_per_side)
+    fee_r = (fee_pct / 100.0) * entry / risk
+    return gross_r - fee_r, gross_pct - fee_pct

@@ -72,10 +72,33 @@ class SetupTests(unittest.TestCase):
         self.assertIsNotNone(got)
         self.assertEqual(got["setup"], "trend_breakout")
         self.assertEqual(got["side"], "long")
-        self.assertGreaterEqual(got["rr"], 2)
-        self.assertLess(got["tp1"], 22.01)
+        self.assertEqual(got["managed"], "chandelier")
+        risk = got["entry"] - got["initial_sl"]
+        self.assertAlmostEqual(got["tp1"], got["entry"] + 2 * risk)
+        self.assertEqual(got["rr"], 2.0)
+        self.assertNotAlmostEqual(got["tp1"], 22.0, places=2)
         self.assertIn("Chandelier", got["trail_rule"])
         self.assertAlmostEqual(got["initial_sl"], got["sl"])
+
+    def test_a_major_high_inside_one_r_vetoes_the_breakout(self):
+        cs = []
+        price = 10.0
+        for i in range(70):
+            price += 0.05
+            cs.append(_bar(i, price, high=price, low=price - 0.1, vol=10))
+        end = 69
+        prior_high = max(cs[i]["h"] for i in range(end - 20, end))
+        cs[end] = _bar(end, prior_high + 0.3, high=prior_high + 0.3, low=cs[end]["l"], vol=40)
+        open_trade = setups.trend_breakout(cs, end, _asset("GRAM"), self.cfg)
+        self.assertIsNotNone(open_trade)
+        risk = open_trade["entry"] - open_trade["initial_sl"]
+        # A completed 4h high just above the entry, outside the 20-bar channel.
+        ceiling = open_trade["entry"] + 0.4 * risk
+        cs[end - 22] = _bar(end - 22, cs[end - 22]["c"], high=ceiling, low=cs[end - 22]["l"], vol=10)
+        blocked = setups.trend_breakout(cs, end, _asset("GRAM"), self.cfg)
+        self.assertIsNone(blocked)
+        _got, reason = setups.inspect_breakout(cs, end, _asset("GRAM"), self.cfg)
+        self.assertEqual(reason, "major_level")
 
     def test_round_trip_taker_fee_comes_off_the_r(self):
         # +1R on a 10 point risk, entry 100. Fees are 0.045% each side.
