@@ -91,6 +91,9 @@ _CFG_KEYS = (
     "short_min_day_ntl_usd", "short_hip3_min_oi_usd", "short_funding_min_pct",
     "shadow_keep_days",
     "swing_wing", "knife_drop_pct", "knife_min_minutes", "knife_max_minutes",
+    "setup_scanner", "setup_donchian", "setup_vol_mult", "setup_ema_fast", "setup_ema_slow",
+    "setup_atr_mult", "setup_chandelier_atr", "setup_support_pct", "setup_max_per_day",
+    "setup_funding_hot_pct", "setup_premium_hot_pct",
 )
 
 # Early components and the config flag that says shadow or live.
@@ -190,6 +193,8 @@ def load_cfg():
         raise RuntimeError("config major_coins debe ser una lista con nombres")
     if cfg["phase1_webhook"] not in ("watch", "tradable", "live"):
         raise RuntimeError("phase1_webhook debe ser watch, tradable o live")
+    if cfg["setup_scanner"] not in ("shadow", "live", "off"):
+        raise RuntimeError("setup_scanner debe ser shadow, live u off")
     for key in EARLY_MODES.values():
         if cfg[key] not in ("shadow", "live"):
             raise RuntimeError(f"{key} debe ser shadow o live")
@@ -199,7 +204,8 @@ def load_cfg():
 def load_state():
     if not STATE.exists() or STATE.stat().st_size == 0:
         return {"marks": [], "last_fire": {}, "last_fire_escalera": {}, "wakes": {}, "wakes_hour": {},
-                "watches": [], "cvd": {}, "early_cursor": 0, "last_shadow": {}}
+                "watches": [], "cvd": {}, "early_cursor": 0, "last_shadow": {},
+                "last_setup": {}, "setup_wakes": {}}
     try:
         st = json.loads(STATE.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
@@ -278,10 +284,22 @@ def load_state():
         if v != v or v in (float("inf"), float("-inf")):
             continue
         last_shadow[str(k)] = float(v)
+    last_setup = {}
+    for k, v in (st.get("last_setup") or {}).items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        if v != v or v in (float("inf"), float("-inf")):
+            continue
+        last_setup[str(k)] = float(v)
+    setup_wakes = {}
+    for k, v in (st.get("setup_wakes") or {}).items():
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            setup_wakes[str(k)] = v
     return {
         "marks": marks, "last_fire": last_fire, "last_fire_escalera": last_fire_escalera,
         "wakes": wakes, "wakes_hour": wakes_hour, "watches": watches, "cvd": cvd,
         "early_cursor": cursor, "last_shadow": last_shadow,
+        "last_setup": last_setup, "setup_wakes": setup_wakes,
     }
 
 
@@ -698,6 +716,65 @@ def _shadow_markdown(rows):
             )
         )
     return "\n".join(lines)
+
+
+def _setup_markdown(rows):
+    lines = ["### Preparaciones (setup)", ""]
+    if not rows:
+        lines.append("- Ninguna preparación nueva en esta pasada.")
+        return "\n".join(lines)
+    lines.append("| coin | tipo | lado | entrada | SL | TP1 | R:R | envío |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    for row in rows:
+        lines.append(
+            "| {coin} | {setup} | {side} | {entry} | {sl} | {tp1} | {rr} | {dispatch} |".format(
+                coin=_cell(row.get("coin")),
+                setup=_cell(row.get("setup")),
+                side=_cell(row.get("side_label") or row.get("side")),
+                entry=_fmt(row.get("entry"), 6),
+                sl=_fmt(row.get("initial_sl"), 6),
+                tp1=_fmt(row.get("tp1"), 6),
+                rr=row.get("rr"),
+                dispatch=_cell(row.get("dispatch")),
+            )
+        )
+    return "\n".join(lines)
+
+
+def write_setups(when, day, rows, keep_days):
+    if not rows:
+        return
+    directory = STATE.parent / "setups"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{day}.csv"
+    previous = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    header = ["ts_madrid", "dex", "coin", "setup", "side", "entry", "initial_sl", "tp1", "tp2",
+              "rr", "confidence", "dispatch", "trail_rule"]
+    import io
+    sio = io.StringIO()
+    writer = csv.writer(sio, lineterminator="\n")
+    writer.writerow(header)
+    if previous:
+        start = 1 if previous[0].startswith("ts_madrid") else 0
+        for line in previous[start:]:
+            if line.strip():
+                sio.write(line + "\n")
+    for row in rows:
+        writer.writerow([
+            when, row.get("dex"), row.get("coin"), row.get("setup"), row.get("side"),
+            _csv_cell(row.get("entry")), _csv_cell(row.get("initial_sl")),
+            _csv_cell(row.get("tp1")), _csv_cell(row.get("tp2")), row.get("rr"),
+            row.get("confidence"), row.get("dispatch"), row.get("trail_rule") or "",
+        ])
+    atomic_write(path, sio.getvalue())
+    cutoff = datetime.strptime(day, "%Y-%m-%d").date() - timedelta(days=int(keep_days) - 1)
+    for old in directory.glob("*.csv"):
+        try:
+            stamp = datetime.strptime(old.stem, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if stamp < cutoff:
+            old.unlink()
 
 
 def write_shadow(when, day, rows, keep_days):
@@ -1556,6 +1633,106 @@ def run_cycle(cfg):
     st["last_fire_escalera"] = {
         k: v for k, v in st["last_fire_escalera"].items() if now - v < cooldown_s
     }
+    setup_rows = []
+    if cfg.get("setup_scanner") not in (None, "off"):
+        import setup_scanner
+        cool = float(cfg["cooldown_hours"]) * H
+        cap = int(cfg["setup_max_per_day"])
+        room = cap - st["setup_wakes"].get(today, 0)
+        btc_4h = None
+        try:
+            btc_4h = candles("BTC", "4h", 220)
+            n_series += 1
+        except Exception as exc:
+            log(f"setup BTC 4h: {exc}")
+        queued = []
+        for asset in assets:
+            if (asset.get("dayNtlVlm") or 0) < cfg["tradable_min_day_ntl_usd"]:
+                continue
+            coin = asset.get("coin")
+            if not coin:
+                continue
+            seen_at = st["last_setup"].get(coin)
+            if seen_at is not None and now - seen_at < cool:
+                continue
+            cs = hourly.get(coin)
+            if not cs:
+                try:
+                    cs = candles(
+                        coin, "1h",
+                        max(
+                            int(cfg["setup_ema_slow"]) + int(cfg["setup_donchian"]) + 10,
+                            4 * (int(cfg["setup_ema_slow"]) + int(cfg["setup_donchian"]) + 5),
+                        ),
+                    )
+                    hourly[coin] = cs
+                    n_series += 1
+                except Exception as exc:
+                    log(f"setup {coin}: {exc}")
+                    continue
+            if len(cs) < int(cfg["setup_ema_slow"]) + 2:
+                continue
+            end = len(cs) - 2 if len(cs) >= 2 else len(cs) - 1
+            closed_ms = (cs[end].get("t") or 0) + H * 1000
+            bias = setup_scanner.btc_bias(btc_4h, closed_ms)
+            if bias is None:
+                bias = "unknown"
+            cs4 = setup_scanner.to_4h(cs)
+            end4 = None
+            for j, bar in enumerate(cs4):
+                if bar["t"] + 4 * H * 1000 <= closed_ms + 1_000:
+                    end4 = j
+            if end4 is not None and closed_ms - (cs4[end4]["t"] + 4 * H * 1000) > 4 * H * 1000:
+                end4 = None
+            got = setup_scanner.evaluate(cs, end, asset, cfg, bias=bias, cs_4h=cs4, end_4h=end4)
+            if not got:
+                continue
+            mark = asset.get("mark")
+            if mark and got.get("managed") == "structural":
+                rr = watchmod.reward_risk(got["side"], mark, got["sl"], got["tp1"])
+                if rr is None or rr < float(cfg["watch_rr_min"]):
+                    continue
+                got["entry"] = mark
+                got["rr"] = round(rr, 2)
+            elif mark and got.get("managed") == "chandelier":
+                # The trail is the exit. A mark through the stop is not a trade;
+                # a mark still beyond the stop keeps the planned risk.
+                if got["side"] == "long" and mark <= got["sl"]:
+                    continue
+                if got["side"] == "short" and mark >= got["sl"]:
+                    continue
+                risk = abs(mark - got["sl"])
+                got["entry"] = mark
+                got["partial_tp"] = mark + 2 * risk if got["side"] == "long" else mark - 2 * risk
+                got["tp1"] = got["partial_tp"]
+                got["rr"] = 2.0
+            got["detected_at_madrid"] = nowm.strftime("%Y-%m-%d %H:%M")
+            st["last_setup"][coin] = now
+            if quiet:
+                got["dispatch"] = "quiet"
+            elif cfg["setup_scanner"] != "live":
+                got["dispatch"] = "shadow"
+            elif room <= 0:
+                got["dispatch"] = "cap"
+            else:
+                queued.append(got)
+                room -= 1
+                continue
+            setup_rows.append(got)
+        if queued:
+            status_setup = send(queued, cfg)
+            if status_setup in ("posted", "dry_run"):
+                st["setup_wakes"][today] = st["setup_wakes"].get(today, 0) + len(queued)
+            for got in queued:
+                got["dispatch"] = status_setup
+                setup_rows.append(got)
+            for got in queued:
+                log(
+                    f"setup {got['coin']} {got['setup']} {got['side']} "
+                    f"entrada={got['entry']} sl={got['initial_sl']} tp1={got['tp1']} rr={got['rr']}"
+                )
+    st["last_setup"] = {k: v for k, v in st["last_setup"].items() if now - v < cooldown_s}
+    st["setup_wakes"] = {k: v for k, v in st["setup_wakes"].items() if k >= today}
     fresh_shadow = _take_shadow_rows(st, shadow_rows, now, cfg)
     st["last_shadow"] = {k: v for k, v in st["last_shadow"].items() if now - v < cooldown_s}
     atomic_write(STATE, json.dumps(st, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
@@ -1566,6 +1743,7 @@ def run_cycle(cfg):
         when, mode, snap.get("count"), len(ranked), n_series, len(pending), sent_n, status, rows,
     )
     markdown += "\n" + _shadow_markdown(fresh_shadow)
+    markdown += "\n" + _setup_markdown(setup_rows)
     if entry_payloads:
         sent = ", ".join(f"{p['coin']} {p['side_label']}" for p in entry_payloads)
         markdown += f"\n\n- `entry_ready` enviado en esta pasada: {sent}"
@@ -1574,6 +1752,7 @@ def run_cycle(cfg):
     try:
         write_scans(when, today, markdown, rows, cfg["scan_keep_days"])
         write_shadow(when, today, fresh_shadow, cfg["shadow_keep_days"])
+        write_setups(when, today, setup_rows, cfg["shadow_keep_days"])
     except Exception as e:
         log(f"no se pudo escribir el historial de scans: {e}")
     line = (

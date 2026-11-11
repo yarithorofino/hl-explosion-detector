@@ -183,7 +183,7 @@ class DetectorTests(unittest.TestCase):
 
         detector.datetime = Fixed
 
-    def cycle(self, assets, candle_fn=None, cfg=None, state=None):
+    def cycle(self, assets, candle_fn=None, cfg=None, state=None, scan_setups=False):
         detector.scan = lambda: snap(assets)
         detector.candles = candle_fn or route()
         if state is not None:
@@ -196,6 +196,8 @@ class DetectorTests(unittest.TestCase):
         use["early_extra_names"] = 0
         use["early_rotate_names"] = 0
         use["cvd_max_coins"] = 0
+        if not scan_setups:
+            use["setup_scanner"] = "off"
         return detector.run_cycle(use)
 
     def read_state(self):
