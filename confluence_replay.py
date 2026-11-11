@@ -26,6 +26,11 @@ OUTCOME_HOURS = 48
 REPORT_DAYS = 14
 WARMUP_DAYS = 5
 LIMIT = 30
+# Taker fee 0.045% plus 0.01% of slippage, each side. Applied as a worse fill.
+COST_PER_SIDE = (0.045 + 0.01) / 100.0
+# A funding print lands a few milliseconds after the hour. Two minutes would
+# still be the same settlement; five seconds cannot reach the next hour.
+FUNDING_SLACK_MS = 5_000
 
 
 def madrid(ms):
@@ -56,18 +61,23 @@ def fetch_funding(coin, start_ms, end_ms):
             except (TypeError, ValueError):
                 continue
             last = max(last, when)
-            if start_ms <= when <= end_ms + 120_000:
-                rows.append((when, pct))
+            if start_ms <= when <= end_ms + FUNDING_SLACK_MS:
+                premium = item.get("premium")
+                try:
+                    premium_pct = float(premium) * 100.0
+                except (TypeError, ValueError):
+                    premium_pct = None
+                rows.append((when, pct, premium_pct))
         if last <= cursor or last >= end_ms:
             break
         cursor = last + 1
     rows.sort()
     deduped = []
-    for when, pct in rows:
-        if deduped and deduped[-1][0] == when:
-            deduped[-1] = (when, pct)
+    for row in rows:
+        if deduped and deduped[-1][0] == row[0]:
+            deduped[-1] = row
         else:
-            deduped.append((when, pct))
+            deduped.append(row)
     return deduped
 
 
@@ -85,13 +95,66 @@ def cached(name, loader):
 
 
 def funding_at(series, close_ms):
-    found = None
-    for when, pct in series:
-        if when <= close_ms + 120_000:
-            found = pct
+    """Latest settlement at or just after the bar close. Not the next hour."""
+    found = (None, None)
+    for row in series:
+        when = row[0]
+        if when <= close_ms + FUNDING_SLACK_MS:
+            found = (row[1], row[2] if len(row) > 2 else None)
         else:
             break
     return found
+
+
+def upper_wick_pct(candle):
+    """Upper wick as a percent of the bar range. None if the bar has no range."""
+    try:
+        opened, high, low, close = (float(candle[k]) for k in ("o", "h", "l", "c"))
+    except (TypeError, ValueError, KeyError):
+        return None
+    span = high - low
+    if span <= 0:
+        return None
+    return (high - max(opened, close)) / span * 100.0
+
+
+def net_r(side, entry, exit_price, sl):
+    """R after a worse fill on both sides. Risk is the planned entry-to-stop distance."""
+    try:
+        entry, exit_price, sl = float(entry), float(exit_price), float(sl)
+    except (TypeError, ValueError):
+        return None
+    risk = abs(entry - sl)
+    if entry <= 0 or risk <= 0 or side not in ("long", "short"):
+        return None
+    if side == "long":
+        filled_entry = entry * (1 + COST_PER_SIDE)
+        filled_exit = exit_price * (1 - COST_PER_SIDE)
+        return (filled_exit - filled_entry) / risk
+    filled_entry = entry * (1 - COST_PER_SIDE)
+    filled_exit = exit_price * (1 + COST_PER_SIDE)
+    return (filled_entry - filled_exit) / risk
+
+
+def short_rule(item):
+    """Funding above -0.01%/h is already required to be posted.
+
+    Exhaustion is an upper wick over half the signal hour, funding above
+    +0.01%/h, or a premium above +0.1%. Anything else is a plain breakdown.
+    """
+    reasons = []
+    wick = upper_wick_pct(item.get("signal_bar") or {})
+    if wick is not None and wick > 50:
+        reasons.append("mecha")
+    funding = item.get("funding_pct")
+    if funding is not None and funding > 0.01:
+        reasons.append("funding")
+    premium = item.get("premium_pct")
+    if premium is not None and premium > 0.1:
+        reasons.append("prima")
+    if reasons:
+        return "agotamiento", reasons
+    return "ruptura", []
 
 
 def day_notional(candles, index):
@@ -124,7 +187,7 @@ def main():
         safe = coin.replace(":", "_").replace("/", "_")
         try:
             candles = cached(f"{safe}_1h.json", lambda c=coin: fetch_candles(c, fetch_start, now_ms))
-            fund = cached(f"{safe}_funding.json", lambda c=coin: fetch_funding(c, fetch_start, now_ms))
+            fund = cached(f"{safe}_funding_v2.json", lambda c=coin: fetch_funding(c, fetch_start, now_ms))
         except Exception as exc:
             errors.append(f"{coin}: {exc}")
             print(f"fallo {coin}: {exc}", flush=True)
@@ -155,7 +218,9 @@ def main():
             view = dict(asset)
             view["dayNtlVlm"] = day
             view["mark"] = candle.get("c")
-            view["funding_pct"] = funding_at(fund, close_ms)
+            funding_pct, premium_pct = funding_at(fund, close_ms)
+            view["funding_pct"] = funding_pct
+            view["premium_pct"] = premium_pct
             if not confluence.in_universe(view, cfg):
                 funnel["libro"] += 1
                 continue
@@ -173,6 +238,11 @@ def main():
             scored.update({
                 "coin": coin, "dex": asset.get("dex") or "main", "t": int(candle["t"]),
                 "close_ms": close_ms, "index": index, "candles": candles,
+                "funding_pct": funding_pct, "premium_pct": premium_pct,
+                "signal_bar": {
+                    "t": candle.get("t"), "o": candle.get("o"), "h": candle.get("h"),
+                    "l": candle.get("l"), "c": candle.get("c"),
+                },
             })
             events.append(scored)
 
@@ -217,6 +287,16 @@ def main():
             left = len(item["candles"]) - 1 - item["index"]
             item["censored"] = item["outcome"] == "open" and left < OUTCOME_HOURS
             item["day"] = day
+            if item["outcome"] == "tp1":
+                item["net_r"] = net_r(item["side"], item["entry"], item["tp1"], item["sl"])
+            elif item["outcome"] == "sl":
+                item["net_r"] = net_r(item["side"], item["entry"], item["sl"], item["sl"])
+            else:
+                item["net_r"] = None
+            if item["side"] == "short":
+                kind, reasons = short_rule(item)
+                item["short_kind"] = kind
+                item["short_reasons"] = reasons
             posted.append(item)
 
     days = []
@@ -260,7 +340,8 @@ def main():
     a(
         "El volumen de 24h de cada vela es la suma del nocional de esa hora y las 23 anteriores. "
         "El OI de HIP-3 es el de hoy. La salida mira 48 horas; si la misma vela toca stop y TP1, "
-        "cuenta como stop. Sin comisión. No se ha cambiado ningún umbral después de ver el resultado."
+        "cuenta como stop. El R neto descuenta 0,045% de comisión y 0,01% de slippage por lado, "
+        "como un peor precio de entrada y de salida. No se ha cambiado ningún umbral después de ver el resultado."
     )
     a("")
     a("## Embudo (sin delta)")
@@ -331,13 +412,79 @@ def main():
             + ". Objetivo: " + ", ".join(f"{name} {kinds[name]}" for name in sorted(kinds)) + "."
         )
     a("")
+    a("## Largos y cortos")
+    a("")
+    a(
+        "El R medio es solo de los que ya tocaron TP1 o el stop. "
+        "Cada lado paga 0,055% (0,045% de comisión más 0,01% de slippage) "
+        "y el riesgo es la distancia prevista entre la entrada y el stop."
+    )
+    a("")
+    a("| Grupo | Avisos | TP1 | SL | Abierto | Resueltos | R neto medio |")
+    a("| --- | ---: | ---: | ---: | ---: | ---: | ---: |")
+
+    def _group_line(label, rows):
+        counts = defaultdict(int)
+        rs = []
+        for item in rows:
+            counts[item["outcome"]] += 1
+            if item.get("net_r") is not None:
+                rs.append(item["net_r"])
+        resolved_n = counts["tp1"] + counts["sl"]
+        avg = sum(rs) / len(rs) if rs else None
+        avg_txt = "—" if avg is None else f"{avg:.3f}"
+        a(f"| {label} | {len(rows)} | {counts['tp1']} | {counts['sl']} | {counts['open']} | {resolved_n} | {avg_txt} |")
+        return counts, avg
+
+    longs = [item for item in posted if item["side"] == "long"]
+    shorts = [item for item in posted if item["side"] == "short"]
+    plain = [item for item in shorts if item.get("short_kind") == "ruptura"]
+    tired = [item for item in shorts if item.get("short_kind") == "agotamiento"]
+    _group_line("Largo", longs)
+    _group_line("Corto, todos (funding ya > −0,01%/h)", shorts)
+    _group_line("Corto de ruptura, sin agotamiento", plain)
+    _group_line("Corto de agotamiento", tired)
+    a("")
+    reason_counts = defaultdict(int)
+    missing_premium = 0
+    for item in shorts:
+        if item.get("premium_pct") is None:
+            missing_premium += 1
+        for reason in item.get("short_reasons") or []:
+            reason_counts[reason] += 1
+    a(
+        f"De {len(shorts)} cortos enviados, {len(plain)} son ruptura limpia y {len(tired)} "
+        f"llevan agotamiento. La mecha superior de la hora de la señal pasa de la mitad del rango "
+        f"en {reason_counts['mecha']}, el funding pasa de +0,01%/h en {reason_counts['funding']}, "
+        f"y la prima pasa de +0,1% en {reason_counts['prima']}. "
+        f"Sin prima en el historial de funding: {missing_premium}."
+    )
+    a("")
+    a(
+        "La regla de corto del equipo, además del funding por encima de −0,01%/h que ya se exige "
+        "para enviar, deja fuera el agotamiento. Esos cortos de ruptura limpia son los que la pasarían."
+    )
+    a("")
+    a("## Sesgo de mirada al futuro")
+    a("")
+    a("| Comprobación | Resultado |")
+    a("| --- | --- |")
+    a("| La entrada es el cierre de la vela de la señal, el precio que existe cuando esa hora cierra. No es el máximo de una vela posterior ni la apertura de la siguiente. | Sin sesgo |")
+    a("| El recorrido hacia TP1 y el stop empieza en la vela siguiente. La vela de la señal no se camina. | Sin sesgo |")
+    a("| Si una vela posterior toca el stop y el TP1, cuenta como stop. | Sin sesgo |")
+    a("| El Donchian, el ATR y el giro del stop salen de las velas que ya habían cerrado antes de abrir la vela de la señal. | Sin sesgo |")
+    a("| La EMA20 y la EMA50 dan un paso con el cierre de la señal. Ese cierre ya se conoce en el momento del aviso; no entra ninguna vela posterior. Es la misma cuenta que el detector en directo. | Sin sesgo |")
+    a("| El funding y la prima son la liquidación de esa hora (el print cae unos milisegundos después del cierre). No se usa la hora siguiente: la ventana aceptada es de 5 segundos, y el siguiente print es una hora después. | Sin sesgo |")
+    a("")
+    a("No había una cifra calculada con una vela que todavía no existía. No se ha rehecho el replay por ese motivo.")
+    a("")
     a("## Qué no mide esto")
     a("")
     a("- El delta. En directo es obligatorio.")
     a("- Las horas corridas de :15, :30 y :45.")
     a(f"- Los perps líquidos fuera de estos {len(universe)} (el directo sí los mira todos).")
     a("- El interés abierto histórico de HIP-3.")
-    a("- Comisiones (0,09% ida y vuelta; el stop mínimo es 2 ATR).")
+    a("- El R de los avisos que siguen abiertos. El R medio de arriba solo usa los que ya salieron.")
     if errors:
         a("")
         a("Errores de lectura:")

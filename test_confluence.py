@@ -300,5 +300,52 @@ class CycleTests(unittest.TestCase):
         self.assertEqual(st["confluence_fire"], {})
 
 
+class ReplayAuditTests(unittest.TestCase):
+    def test_funding_print_after_the_close_is_this_hour_only(self):
+        import confluence_replay as replay
+        close = 3_600_000
+        series = [
+            (close - 3_600_000 + 26, 0.001, 0.01),
+            (close + 26, 0.002, 0.2),
+            (close + 3_600_000 + 26, 0.05, 1.0),
+        ]
+        self.assertEqual(replay.funding_at(series, close), (0.002, 0.2))
+
+    def test_costs_come_off_both_sides_and_a_stop_is_negative(self):
+        import confluence_replay as replay
+        # Planned 1R stop. Costs make a stop slightly worse than -1.
+        lost = replay.net_r("long", 100, 90, 90)
+        self.assertLess(lost, -1)
+        won = replay.net_r("long", 100, 120, 90)
+        self.assertLess(won, 2)
+        self.assertGreater(won, 0)
+
+    def test_upper_wick_and_hot_funding_mark_exhaustion(self):
+        import confluence_replay as replay
+        bar = {"o": 10, "h": 12, "l": 10, "c": 10.2}
+        self.assertGreater(replay.upper_wick_pct(bar), 50)
+        kind, reasons = replay.short_rule({
+            "signal_bar": bar, "funding_pct": 0.02, "premium_pct": 0.05,
+        })
+        self.assertEqual(kind, "agotamiento")
+        self.assertIn("mecha", reasons)
+        self.assertIn("funding", reasons)
+        plain, why = replay.short_rule({
+            "signal_bar": {"o": 10, "h": 10.4, "l": 9, "c": 9.2},
+            "funding_pct": 0.001, "premium_pct": 0.01,
+        })
+        self.assertEqual(plain, "ruptura")
+        self.assertEqual(why, [])
+
+    def test_path_starts_after_the_signal_and_a_double_touch_is_a_stop(self):
+        signal = {"h": 11, "l": 8, "c": 10}
+        both = {"h": 12, "l": 7, "c": 9}
+        later = {"h": 13, "l": 9.5, "c": 12}
+        self.assertEqual(
+            confluence.walk_outcome([signal, both, later], 0, "long", 10, 8, 11),
+            "sl",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
