@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Explosion detector for Hyperliquid perps (main + HIP-3). Analysis only, never trades.
 
+The only webhook is confluence_1h (see confluence.py): a rolling 1h trend,
+Donchian breakout and aggressive volume, for every liquid perp. The phase-1
+explosion rules below still fill the scan table, and they do not POST.
+Early signals, setup_scanner and entry_ready are off.
+
 Live:     python3 detector.py
 Backtest: python3 detector.py --backtest [hours]   (1h rule only)
 Test POST: python3 detector.py --force-test
@@ -42,6 +47,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import confluence
 import early_signals
 import watch as watchmod
 from perps_all import post, scan
@@ -88,12 +94,18 @@ _CFG_KEYS = (
     "early_rotate_names",
     "phase1_webhook",
     "mode_absorption", "mode_vol_accel", "mode_squeeze", "mode_oi", "mode_cvd", "mode_funding",
+    "early_signals", "entry_ready",
     "short_min_day_ntl_usd", "short_hip3_min_oi_usd", "short_funding_min_pct",
     "shadow_keep_days",
     "swing_wing", "knife_drop_pct", "knife_min_minutes", "knife_max_minutes",
     "setup_scanner", "setup_donchian", "setup_vol_mult", "setup_ema_fast", "setup_ema_slow",
     "setup_atr_mult", "setup_chandelier_atr", "setup_support_pct", "setup_max_per_day",
     "setup_funding_hot_pct", "setup_premium_hot_pct",
+    "confluence_day_ntl_usd", "confluence_hip3_min_oi_usd", "confluence_donchian",
+    "confluence_vol_mult", "confluence_ema_fast", "confluence_ema_slow",
+    "confluence_atr_stop", "confluence_extension_atr", "confluence_cooldown_hours",
+    "confluence_max_wakes_per_day", "confluence_delta_min_coverage",
+    "confluence_delta_max_gap_sec", "confluence_keep_days",
 )
 
 # Early components and the config flag that says shadow or live.
@@ -196,8 +208,12 @@ def load_cfg():
     if cfg["setup_scanner"] not in ("shadow", "live", "off"):
         raise RuntimeError("setup_scanner debe ser shadow, live u off")
     for key in EARLY_MODES.values():
-        if cfg[key] not in ("shadow", "live"):
-            raise RuntimeError(f"{key} debe ser shadow o live")
+        if cfg[key] not in ("shadow", "live", "off"):
+            raise RuntimeError(f"{key} debe ser shadow, live u off")
+    if cfg["early_signals"] != "off":
+        raise RuntimeError("early_signals debe ser off")
+    if cfg["entry_ready"] != "off":
+        raise RuntimeError("entry_ready debe ser off")
     return cfg
 
 
@@ -205,7 +221,9 @@ def load_state():
     if not STATE.exists() or STATE.stat().st_size == 0:
         return {"marks": [], "last_fire": {}, "last_fire_escalera": {}, "wakes": {}, "wakes_hour": {},
                 "watches": [], "cvd": {}, "early_cursor": 0, "last_shadow": {},
-                "last_setup": {}, "setup_wakes": {}}
+                "last_setup": {}, "setup_wakes": {},
+                "confluence_fire": {}, "confluence_wakes": {}, "confluence_log": {},
+                "delta": confluence.empty_delta()}
     try:
         st = json.loads(STATE.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
@@ -295,11 +313,31 @@ def load_state():
     for k, v in (st.get("setup_wakes") or {}).items():
         if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
             setup_wakes[str(k)] = v
+    confluence_fire = {}
+    for k, v in (st.get("confluence_fire") or {}).items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        if v != v or v in (float("inf"), float("-inf")):
+            continue
+        confluence_fire[str(k)] = float(v)
+    confluence_wakes = {}
+    for k, v in (st.get("confluence_wakes") or {}).items():
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            confluence_wakes[str(k)] = v
+    confluence_log = {}
+    for k, v in (st.get("confluence_log") or {}).items():
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        if v != v or v in (float("inf"), float("-inf")):
+            continue
+        confluence_log[str(k)] = float(v)
     return {
         "marks": marks, "last_fire": last_fire, "last_fire_escalera": last_fire_escalera,
         "wakes": wakes, "wakes_hour": wakes_hour, "watches": watches, "cvd": cvd,
         "early_cursor": cursor, "last_shadow": last_shadow,
         "last_setup": last_setup, "setup_wakes": setup_wakes,
+        "confluence_fire": confluence_fire, "confluence_wakes": confluence_wakes,
+        "confluence_log": confluence_log, "delta": confluence.clean_delta(st.get("delta")),
     }
 
 
@@ -1177,19 +1215,12 @@ def _trigger_set(alert):
 
 
 def _wants_webhook(alert, cfg):
-    """Phase-1 posts only when the config says so. Shadow early signals never post."""
-    names = _trigger_set(alert)
-    phase1 = names & PHASE1_TRIGGERS
-    early = names & set(EARLY_MODES)
-    post = False
-    mode = cfg["phase1_webhook"]
-    if phase1 and mode == "live":
-        post = True
-    elif phase1 and mode == "tradable" and alert.get("tradable"):
-        post = True
-    if any(cfg[EARLY_MODES[name]] == "live" for name in early):
-        post = True
-    return post
+    """Phase-1 and early names stay in the log. They do not wake the webhook.
+
+    confluence_1h is the only live POST. `cfg` stays in the signature so the
+    call site does not change; the mode flags cannot turn this back on.
+    """
+    return False
 
 
 def short_entry_allowed(watch, cfg):
@@ -1232,6 +1263,254 @@ def _entry_payload(watch, nowm):
     if watch.get("kind"):
         payload["kind"] = watch["kind"]
     return payload
+
+
+_CONF_NOTE_SEC = {
+    "quiet": 4 * H,
+    "tope": 4 * H,
+    "extendido": 30 * 60,
+    "sin_delta": 30 * 60,
+    "sin_presion": 30 * 60,
+    "veto_funding": 30 * 60,
+}
+
+
+def _note_once(st, key, now, window):
+    prev = st["confluence_log"].get(key)
+    if prev is not None and now - prev < window:
+        return False
+    st["confluence_log"][key] = now
+    return True
+
+
+def _confluence_dir():
+    return STATE.parent / "confluence"
+
+
+def write_confluence(when, day, rows, keep_days):
+    if not rows:
+        return
+    directory = _confluence_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{day}.csv"
+    previous = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    header = [
+        "ts_madrid", "dex", "coin", "side", "status", "ema20", "ema50", "donchian",
+        "vol_mult", "delta", "delta_coverage", "buy_ntl", "sell_ntl", "mark", "day_ntl",
+        "oi_usd", "funding_pct", "premium_pct", "atr", "extension_atr", "entry", "sl",
+        "sl_kind", "tp1", "tp2", "rr", "rr_tp2", "tp_kind", "note",
+    ]
+    import io
+    sio = io.StringIO()
+    writer = csv.writer(sio, lineterminator="\n")
+    writer.writerow(header)
+    if previous:
+        start = 1 if previous[0].startswith("ts_madrid") else 0
+        for line in previous[start:]:
+            if line.strip():
+                sio.write(line + "\n")
+    for row in rows:
+        writer.writerow([row.get(name, "") for name in header])
+    atomic_write(path, sio.getvalue())
+    cutoff = datetime.strptime(day, "%Y-%m-%d").date() - timedelta(days=int(keep_days) - 1)
+    for old in directory.glob("*.csv"):
+        try:
+            stamp = datetime.strptime(old.stem, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if stamp < cutoff:
+            old.unlink()
+
+
+def _conf_cell(value, nd=None):
+    if nd is not None and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return _csv_cell(round(value, nd))
+    return _csv_cell(value)
+
+
+def _conf_csv_row(when, asset, status, scored):
+    return {
+        "ts_madrid": when,
+        "dex": asset.get("dex") or "main",
+        "coin": asset.get("coin") or "",
+        "side": scored.get("side") or "",
+        "status": status,
+        "ema20": _conf_cell(scored.get("ema20"), 8),
+        "ema50": _conf_cell(scored.get("ema50"), 8),
+        "donchian": _conf_cell(scored.get("donchian"), 8),
+        "vol_mult": _conf_cell(scored.get("vol_mult"), 2),
+        "delta": _conf_cell(scored.get("delta"), 2),
+        "delta_coverage": _conf_cell(scored.get("delta_coverage"), 3),
+        "buy_ntl": _conf_cell(scored.get("buy_ntl"), 2),
+        "sell_ntl": _conf_cell(scored.get("sell_ntl"), 2),
+        "mark": _conf_cell(asset.get("mark"), 8),
+        "day_ntl": _conf_cell(asset.get("dayNtlVlm"), 2),
+        "oi_usd": _conf_cell(asset.get("oi_usd"), 2),
+        "funding_pct": _conf_cell(asset.get("funding_pct"), 6),
+        "premium_pct": _conf_cell(asset.get("premium_pct"), 4),
+        "atr": _conf_cell(scored.get("atr"), 8),
+        "extension_atr": _conf_cell(scored.get("extension_atr"), 2),
+        "entry": _conf_cell(scored.get("entry"), 8),
+        "sl": _conf_cell(scored.get("sl"), 8),
+        "sl_kind": scored.get("sl_kind") or "",
+        "tp1": _conf_cell(scored.get("tp1"), 8),
+        "tp2": _conf_cell(scored.get("tp2"), 8),
+        "rr": _conf_cell(scored.get("rr"), 2),
+        "rr_tp2": _conf_cell(scored.get("rr_tp2"), 2),
+        "tp_kind": scored.get("tp_kind") or "",
+        "note": scored.get("delta_reason") or "",
+    }
+
+
+def _ensure_candles(cache, coin, interval, bars):
+    got = cache.get(coin)
+    if got is not None and len(got) >= bars:
+        return got, False
+    cache[coin] = candles(coin, interval, bars)
+    return cache[coin], True
+
+
+def _confluence_markdown(rows, universe_n, status):
+    lines = [
+        "",
+        "### Confluencia 1h (lo único que llama al webhook)",
+        "",
+        f"- Universo líquido: {universe_n}. Estado de esta pasada: `{status}`.",
+    ]
+    if not rows:
+        lines.append("- Ninguna fila nueva (ruptura con volumen, o filtros).")
+        return "\n".join(lines)
+    lines.append("")
+    lines.append("| coin | lado | estado | vol | delta | R:R |")
+    lines.append("| --- | --- | --- | --- | --- | --- |")
+    for row in rows:
+        lines.append(
+            "| {coin} | {side} | {status} | {vol} | {delta} | {rr} |".format(
+                coin=_cell(row["coin"]),
+                side=_cell(row["side"] or "—"),
+                status=_cell(row["status"]),
+                vol=row["vol_mult"] or "—",
+                delta=row["delta"] or "—",
+                rr=row["rr"] or "—",
+            )
+        )
+    return "\n".join(lines)
+
+
+def run_confluence(cfg, st, assets, hourly, fifteens, now, nowm, quiet):
+    """Scan every liquid perp. POST only a full confluence_1h. Returns a summary."""
+    tape = confluence.read_tape_file(STATE.parent / "delta_tape.json")
+    st["delta"] = confluence.merge_tape(st.get("delta"), tape, now * 1000)
+    st.setdefault("confluence_fire", {})
+    st.setdefault("confluence_wakes", {})
+    st.setdefault("confluence_log", {})
+    universe = [a for a in assets if confluence.in_universe(a, cfg)]
+    need_h = confluence.bars_1h(cfg)
+    need_m = confluence.bars_15m(cfg)
+    today = nowm.strftime("%Y-%m-%d")
+    when = nowm.strftime("%Y-%m-%d %H:%M")
+    cool = float(cfg["confluence_cooldown_hours"]) * H
+    cap = int(cfg["confluence_max_wakes_per_day"])
+    wakes = st["confluence_wakes"].get(today, 0)
+    queued = []
+    quiet_payloads = []
+    rows = []
+    series = 0
+
+    def _keep(asset, status, scored):
+        window = _CONF_NOTE_SEC.get(status)
+        if window is not None and not _note_once(st, f"{asset.get('coin')}|{status}", now, window):
+            return False
+        rows.append(_conf_csv_row(when, asset, status, scored))
+        note = scored.get("delta_reason") or ""
+        log(
+            f"confluencia {asset.get('coin')} {scored.get('side') or '—'} "
+            f"estado={status} vol={scored.get('vol_mult')} {note}".rstrip()
+        )
+        return True
+
+    for asset in universe:
+        coin = asset.get("coin")
+        if not coin:
+            continue
+        try:
+            _cs_h, fetched_h = _ensure_candles(hourly, coin, "1h", need_h)
+            _cs_m, fetched_m = _ensure_candles(fifteens, coin, "15m", need_m)
+            series += int(fetched_h) + int(fetched_m)
+            cs_h, cs_m = hourly.get(coin), fifteens.get(coin)
+        except Exception as exc:
+            log(f"confluencia velas {coin}: {exc}")
+            continue
+        try:
+            scored = confluence.score_from_candles(
+                cs_h, cs_m, now * 1000, asset, st.get("delta"), cfg, require_delta=True,
+            )
+        except Exception as exc:
+            log(f"confluencia {coin}: {exc}")
+            continue
+        status = scored.get("status")
+        if status == "alerta":
+            seen = st["confluence_fire"].get(coin)
+            if seen is not None and now - seen < cool:
+                continue
+            if quiet:
+                if _keep(asset, "quiet", scored):
+                    quiet_payloads.append(confluence.public_payload(scored, asset, when))
+            else:
+                queued.append((asset, scored))
+            continue
+        if status in confluence.LOG_STATUSES:
+            _keep(asset, status, scored)
+
+    sent_n = 0
+    status = "none"
+    if queued and wakes >= cap:
+        status = "daily_cap_logged"
+        for asset, scored in queued:
+            _keep(asset, "tope", scored)
+    elif queued:
+        payloads = [confluence.public_payload(scored, asset, when) for asset, scored in queued]
+        status = send(payloads, cfg)
+        if status in ("posted", "dry_run"):
+            st["confluence_wakes"][today] = wakes + 1
+            for asset, _scored in queued:
+                st["confluence_fire"][asset["coin"]] = now
+            sent_n = len(queued) if status == "posted" else 0
+        for asset, scored in queued:
+            rows.append(_conf_csv_row(when, asset, status, scored))
+            log(
+                f"confluencia {asset.get('coin')} {scored.get('side')} estado={status} "
+                f"entrada={scored.get('entry')} sl={scored.get('sl')} tp1={scored.get('tp1')} "
+                f"rr={scored.get('rr')}"
+            )
+        if status in ("posted", "dry_run", "post_failed"):
+            append_jsonl(ALERTS, {
+                "at": nowm.isoformat(timespec="seconds"),
+                "status": status,
+                "alerts": payloads,
+            })
+    elif quiet_payloads:
+        status = "quiet_hours_logged"
+        append_jsonl(ALERTS, {
+            "at": nowm.isoformat(timespec="seconds"),
+            "status": status,
+            "alerts": quiet_payloads,
+        })
+
+    st["confluence_fire"] = {k: v for k, v in st["confluence_fire"].items() if now - v < cool}
+    st["confluence_wakes"] = {k: v for k, v in st["confluence_wakes"].items() if k >= today}
+    st["confluence_log"] = {k: v for k, v in st["confluence_log"].items() if now - v < 2 * 86400}
+    summary = (
+        f"confluencia universo={len(universe)} velas={series} filas={len(rows)} "
+        f"enviados={sent_n} status={status}"
+    )
+    log(summary)
+    return {
+        "rows": rows, "series": series, "sent": sent_n, "status": status,
+        "markdown": _confluence_markdown(rows, len(universe), status),
+        "summary": summary,
+    }
+
 
 
 def run_cycle(cfg):
@@ -1300,6 +1579,12 @@ def run_cycle(cfg):
     bars_1h = int(cfg["avg_window_hours"]) + int(cfg["atr_period"]) + 3
     bars_15 = int(cfg["avg_window_15m"]) + 8
 
+    if cfg.get("early_signals") == "off":
+        # Do not spend candle calls rotating names the early book no longer scores.
+        cfg = dict(cfg)
+        cfg["early_extra_names"] = 0
+        cfg["early_rotate_names"] = 0
+        cfg["cvd_max_coins"] = 0
     rows = []
     shadow_rows = []
     hourly = {}
@@ -1343,11 +1628,13 @@ def run_cycle(cfg):
         view_1h = view_15 = None
         cs_h = cs_m = None
         try:
-            need_1h = max(
-                bars_1h,
-                int(cfg["squeeze_bb_period"]) + int(cfg["squeeze_min_bars_inside"]) + 2,
-                int(cfg["absorption_median_bars"]) + int(cfg["absorption_repeat_bars"]) + 2,
-            )
+            need_1h = bars_1h
+            if cfg.get("early_signals") != "off":
+                need_1h = max(
+                    bars_1h,
+                    int(cfg["squeeze_bb_period"]) + int(cfg["squeeze_min_bars_inside"]) + 2,
+                    int(cfg["absorption_median_bars"]) + int(cfg["absorption_repeat_bars"]) + 2,
+                )
             cs_h = candles(a["coin"], "1h", need_1h)
             hourly[a["coin"]] = cs_h
             view_1h = series_view(cs_h, "1h", cfg, floor)
@@ -1365,20 +1652,23 @@ def run_cycle(cfg):
                     extremes[a["coin"]] = ext
             except Exception as e:
                 log(f"velas 15m {a['coin']}: {e}")
-        early = evaluate_early(cs_h, cs_m, a, old, cvd_stats.get(a["coin"]), cfg)
-        if early.get("triggers"):
-            shadow_rows.append({
-                "dex": a.get("dex") or "",
-                "coin": a.get("coin") or "",
-                "side": early.get("side") or "",
-                "trigger": "+".join(early["triggers"]),
-                "score": early.get("score") or 0,
-                "components": "+".join(early["triggers"]),
-                "price": a.get("mark"),
-                "day_ntl": a.get("dayNtlVlm"),
-                "oi_usd": a.get("oi_usd"),
-                "funding_pct": _funding_pct(a),
-            })
+        if cfg.get("early_signals") == "off":
+            early = {"hit": False, "triggers": [], "side": None}
+        else:
+            early = evaluate_early(cs_h, cs_m, a, old, cvd_stats.get(a["coin"]), cfg)
+            if early.get("triggers"):
+                shadow_rows.append({
+                    "dex": a.get("dex") or "",
+                    "coin": a.get("coin") or "",
+                    "side": early.get("side") or "",
+                    "trigger": "+".join(early["triggers"]),
+                    "score": early.get("score") or 0,
+                    "components": "+".join(early["triggers"]),
+                    "price": a.get("mark"),
+                    "day_ntl": a.get("dayNtlVlm"),
+                    "oi_usd": a.get("oi_usd"),
+                    "funding_pct": _funding_pct(a),
+                })
         names = trigger_names(view_1h, view_15)
         if early.get("hit"):
             names = names + [n for n in early["triggers"] if n not in names]
@@ -1503,129 +1793,8 @@ def run_cycle(cfg):
                 f"floor={p['floor_pct']} atr={p['atr_pct']} tradable={p['tradable']} "
                 f"label={p['label']} exhaustion={p['exhaustion_flag']}"
             )
-    # Phase 2 reads watches opened on earlier scans. New watches are added after,
-    # so the impulse bar itself is not treated as the retest.
-    assets_by_coin = {a["coin"]: a for a in assets}
-    allow_entry = not (quiet and cfg.get("entry_ready_respect_quiet_hours", True))
-    entry_payloads = []
-    kept = []
-    for w in st.get("watches") or []:
-        if w.get("status") != "open":
-            if w.get("status") == "entry_sent" and now - w.get("entry_sent_at", now) < 7 * 86400:
-                kept.append(w)
-            continue
-        ext = extremes.get(w["coin"])
-        mark = fresh_m.get(w["coin"])
-        if ext:
-            high, low, close = ext
-        elif mark is not None:
-            high = low = close = mark
-        else:
-            high = low = close = None
-        book = assets_by_coin.get(w["coin"])
-        if book:
-            w["day_ntl"] = book.get("dayNtlVlm")
-            w["oi_usd"] = book.get("oi_usd")
-            w["funding_pct"] = _funding_pct(book)
-            if book.get("dex"):
-                w["dex"] = book.get("dex")
-        w, event = watchmod.advance_watch(w, high, low, close, now, cfg, allow_entry=allow_entry)
-        if event == "entry_ready":
-            ok_short, why = short_entry_allowed(w, cfg)
-            if not ok_short:
-                w["status"] = "open"
-                for key in ("fill", "rr", "entry_sent_at"):
-                    w.pop(key, None)
-                if w.get("short_block") != why:
-                    log(f"corto no enviado {w['coin']}: {why}")
-                    w["short_block"] = why
-            else:
-                w.pop("short_block", None)
-                mark_now = fresh_m.get(w["coin"])
-                if w["coin"] not in hourly:
-                    try:
-                        hourly[w["coin"]] = candles(
-                            w["coin"], "1h",
-                            max(int(cfg["avg_window_hours"]) + int(cfg["swing_wing"]) * 2 + 2, 26),
-                        )
-                        n_series += 1
-                    except Exception as exc:
-                        log(f"velas 1h {w['coin']}: {exc}")
-                if w["coin"] not in fifteens:
-                    try:
-                        fifteens[w["coin"]] = candles(w["coin"], "15m", 8)
-                        n_series += 1
-                    except Exception as exc:
-                        log(f"velas 15m {w['coin']}: {exc}")
-                ok_level, why = watchmod.qualify_entry(
-                    w, mark_now if mark_now is not None else w.get("fill"),
-                    hourly.get(w["coin"]), fifteens.get(w["coin"]),
-                    int(now * 1000), cfg,
-                )
-                if not ok_level:
-                    w["status"] = "open"
-                    for key in ("fill", "rr", "entry_sent_at"):
-                        w.pop(key, None)
-                    if w.get("level_block") != why:
-                        log(f"entrada no enviada {w['coin']}: {why}")
-                        w["level_block"] = why
-                else:
-                    w.pop("level_block", None)
-                    entry_payloads.append(_entry_payload(w, nowm))
-        if event == "quiet" and not w.get("quiet_noted"):
-            log(f"entrada en silencio {w['coin']} {w['side']}")
-            w["quiet_noted"] = True
-        if w.get("status") in ("open", "entry_sent"):
-            kept.append(w)
-    open_keys = {(w["coin"], w["side"]): w for w in kept if w.get("status") == "open"}
-    for alert in pending:
-        if alert.get("urgency") == "baja" and alert.get("_side") in ("long", "short"):
-            # The range has not broken yet. Direction is the close location
-            # (or the taker imbalance), not the largest wiggle inside the range.
-            side = alert["_side"]
-        else:
-            side = _side_from_moves(alert.get("pct_3h"), alert.get("pct_1h"), alert.get("pct_15m"), alert.get("_side"))
-        if not side:
-            continue
-        absorption_watch = alert.get("urgency") == "baja" and alert.get("_range_low") is not None
-        existing = open_keys.get((alert["coin"], side))
-        if existing and not (absorption_watch and existing.get("kind") == "absorption"):
-            continue
-        if absorption_watch:
-            built = watchmod.build_absorption_watch(
-                alert["coin"], alert.get("dex"), side, alert.get("trigger"),
-                alert.get("_range_low"), alert.get("_range_high"), now, cfg,
-            )
-        else:
-            bars = alert.get("_bars") or []
-            if len(bars) < 1:
-                continue
-            built = watchmod.build_watch(alert["coin"], alert.get("dex"), side, alert.get("trigger"), bars, now, cfg)
-        if not built:
-            continue
-        built["day_ntl"] = alert.get("dayNtlVlm")
-        built["oi_usd"] = alert.get("oi_usd")
-        built["funding_pct"] = alert.get("funding_pct")
-        if existing and existing.get("kind") == "absorption":
-            # A later spike in the same campaign widens the range and restarts the clock.
-            built["created_at"] = existing.get("created_at", now)
-            for key, value in built.items():
-                if key != "created_at":
-                    existing[key] = value
-            continue
-        kept.append(built)
-        open_keys[(alert["coin"], side)] = built
-    st["watches"] = kept[-80:]
-    if entry_payloads:
-        entry_status = send(entry_payloads, cfg)
-        append_jsonl(ALERTS, {
-            "at": nowm.isoformat(timespec="seconds"), "status": entry_status, "alerts": entry_payloads,
-        })
-        for item in entry_payloads:
-            log(
-                f"entry_ready {item['coin']} {item['side']} entrada={item['entry']} "
-                f"sl={item['sl']} tp1={item['tp1']} rr={item['rr']} trigger={item['trigger']}"
-            )
+    # entry_ready and setup_scanner do not wake anything. Drop stored watches
+    # so a zone saved by an older version cannot POST on a later cycle.
     st["wakes"] = {k: v for k, v in st["wakes"].items() if k >= today}
     st["wakes_hour"] = {k: v for k, v in st["wakes_hour"].items() if k == hour_key}
     cooldown_s = cfg["cooldown_hours"] * H
@@ -1633,108 +1802,24 @@ def run_cycle(cfg):
     st["last_fire_escalera"] = {
         k: v for k, v in st["last_fire_escalera"].items() if now - v < cooldown_s
     }
+    st["watches"] = []
     setup_rows = []
-    if cfg.get("setup_scanner") not in (None, "off"):
-        import setup_scanner
-        cool = float(cfg["cooldown_hours"]) * H
-        cap = int(cfg["setup_max_per_day"])
-        room = cap - st["setup_wakes"].get(today, 0)
-        btc_4h = None
-        try:
-            btc_4h = candles("BTC", "4h", 220)
-            n_series += 1
-        except Exception as exc:
-            log(f"setup BTC 4h: {exc}")
-        queued = []
-        for asset in assets:
-            if (asset.get("dayNtlVlm") or 0) < cfg["tradable_min_day_ntl_usd"]:
-                continue
-            coin = asset.get("coin")
-            if not coin:
-                continue
-            seen_at = st["last_setup"].get(coin)
-            if seen_at is not None and now - seen_at < cool:
-                continue
-            cs = hourly.get(coin)
-            if not cs:
-                try:
-                    cs = candles(
-                        coin, "1h",
-                        max(
-                            int(cfg["setup_ema_slow"]) + int(cfg["setup_donchian"]) + 10,
-                            4 * (int(cfg["setup_ema_slow"]) + int(cfg["setup_donchian"]) + 5),
-                        ),
-                    )
-                    hourly[coin] = cs
-                    n_series += 1
-                except Exception as exc:
-                    log(f"setup {coin}: {exc}")
-                    continue
-            if len(cs) < int(cfg["setup_ema_slow"]) + 2:
-                continue
-            end = len(cs) - 2 if len(cs) >= 2 else len(cs) - 1
-            closed_ms = (cs[end].get("t") or 0) + H * 1000
-            bias = setup_scanner.btc_bias(btc_4h, closed_ms)
-            if bias is None:
-                bias = "unknown"
-            cs4 = setup_scanner.to_4h(cs)
-            end4 = None
-            for j, bar in enumerate(cs4):
-                if bar["t"] + 4 * H * 1000 <= closed_ms + 1_000:
-                    end4 = j
-            if end4 is not None and closed_ms - (cs4[end4]["t"] + 4 * H * 1000) > 4 * H * 1000:
-                end4 = None
-            got = setup_scanner.evaluate(cs, end, asset, cfg, bias=bias, cs_4h=cs4, end_4h=end4)
-            if not got:
-                continue
-            mark = asset.get("mark")
-            if mark and got.get("managed") == "structural":
-                rr = watchmod.reward_risk(got["side"], mark, got["sl"], got["tp1"])
-                if rr is None or rr < float(cfg["watch_rr_min"]):
-                    continue
-                got["entry"] = mark
-                got["rr"] = round(rr, 2)
-            elif mark and got.get("managed") == "chandelier":
-                # The trail is the exit. A mark through the stop is not a trade;
-                # a mark still beyond the stop keeps the planned risk.
-                if got["side"] == "long" and mark <= got["sl"]:
-                    continue
-                if got["side"] == "short" and mark >= got["sl"]:
-                    continue
-                risk = abs(mark - got["sl"])
-                got["entry"] = mark
-                got["partial_tp"] = mark + 2 * risk if got["side"] == "long" else mark - 2 * risk
-                got["tp1"] = got["partial_tp"]
-                got["rr"] = 2.0
-            got["detected_at_madrid"] = nowm.strftime("%Y-%m-%d %H:%M")
-            st["last_setup"][coin] = now
-            if quiet:
-                got["dispatch"] = "quiet"
-            elif cfg["setup_scanner"] != "live":
-                got["dispatch"] = "shadow"
-            elif room <= 0:
-                got["dispatch"] = "cap"
-            else:
-                queued.append(got)
-                room -= 1
-                continue
-            setup_rows.append(got)
-        if queued:
-            status_setup = send(queued, cfg)
-            if status_setup in ("posted", "dry_run"):
-                st["setup_wakes"][today] = st["setup_wakes"].get(today, 0) + len(queued)
-            for got in queued:
-                got["dispatch"] = status_setup
-                setup_rows.append(got)
-            for got in queued:
-                log(
-                    f"setup {got['coin']} {got['setup']} {got['side']} "
-                    f"entrada={got['entry']} sl={got['initial_sl']} tp1={got['tp1']} rr={got['rr']}"
-                )
-    st["last_setup"] = {k: v for k, v in st["last_setup"].items() if now - v < cooldown_s}
-    st["setup_wakes"] = {k: v for k, v in st["setup_wakes"].items() if k >= today}
-    fresh_shadow = _take_shadow_rows(st, shadow_rows, now, cfg)
-    st["last_shadow"] = {k: v for k, v in st["last_shadow"].items() if now - v < cooldown_s}
+    if cfg.get("early_signals") == "off":
+        fresh_shadow = []
+        st["last_shadow"] = {}
+    else:
+        fresh_shadow = _take_shadow_rows(st, shadow_rows, now, cfg)
+        st["last_shadow"] = {k: v for k, v in st["last_shadow"].items() if now - v < cooldown_s}
+    try:
+        conf = run_confluence(cfg, st, assets, hourly, fifteens, now, nowm, quiet)
+        n_series += conf["series"]
+    except Exception as exc:
+        log(f"confluencia no completada: {exc}")
+        conf = {
+            "rows": [], "series": 0, "sent": 0, "status": "none",
+            "markdown": "\n\n### Confluencia 1h\n\n- No se pudo completar.",
+            "summary": "confluencia status=error",
+        }
     atomic_write(STATE, json.dumps(st, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
 
     when = nowm.strftime("%Y-%m-%d %H:%M")
@@ -1742,17 +1827,24 @@ def run_cycle(cfg):
     markdown = render_scan_markdown(
         when, mode, snap.get("count"), len(ranked), n_series, len(pending), sent_n, status, rows,
     )
-    markdown += "\n" + _shadow_markdown(fresh_shadow)
-    markdown += "\n" + _setup_markdown(setup_rows)
-    if entry_payloads:
-        sent = ", ".join(f"{p['coin']} {p['side_label']}" for p in entry_payloads)
-        markdown += f"\n\n- `entry_ready` enviado en esta pasada: {sent}"
+    markdown += conf["markdown"]
+    if cfg.get("early_signals") == "off":
+        markdown += "\n\n### Sombra\n\n- Apagada."
+    else:
+        markdown += "\n" + _shadow_markdown(fresh_shadow)
+    if cfg.get("setup_scanner") == "off":
+        markdown += "\n\n### Preparaciones\n\n- Apagadas."
+    else:
+        markdown += "\n" + _setup_markdown(setup_rows)
     print(markdown, flush=True)
     write_summary(markdown.splitlines())
     try:
         write_scans(when, today, markdown, rows, cfg["scan_keep_days"])
-        write_shadow(when, today, fresh_shadow, cfg["shadow_keep_days"])
-        write_setups(when, today, setup_rows, cfg["shadow_keep_days"])
+        if fresh_shadow:
+            write_shadow(when, today, fresh_shadow, cfg["shadow_keep_days"])
+        if setup_rows:
+            write_setups(when, today, setup_rows, cfg["shadow_keep_days"])
+        write_confluence(when, today, conf["rows"], cfg["confluence_keep_days"])
     except Exception as e:
         log(f"no se pudo escribir el historial de scans: {e}")
     line = (

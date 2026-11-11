@@ -240,8 +240,14 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(cfg["prefilter_pct_15m"], 3.0)
         self.assertEqual(cfg["scan_keep_days"], 14)
         self.assertEqual(cfg["phase1_webhook"], "watch")
-        self.assertEqual(cfg["mode_absorption"], "shadow")
-        self.assertEqual(cfg["mode_squeeze"], "shadow")
+        self.assertEqual(cfg["early_signals"], "off")
+        self.assertEqual(cfg["entry_ready"], "off")
+        self.assertEqual(cfg["setup_scanner"], "off")
+        self.assertEqual(cfg["mode_absorption"], "off")
+        self.assertEqual(cfg["mode_squeeze"], "off")
+        self.assertEqual(cfg["confluence_day_ntl_usd"], 5_000_000)
+        self.assertEqual(cfg["confluence_extension_atr"], 2.0)
+        self.assertEqual(cfg["confluence_max_wakes_per_day"], 8)
         self.assertEqual(cfg["short_min_day_ntl_usd"], 5_000_000)
         self.assertEqual(cfg["short_funding_min_pct"], -0.01)
 
@@ -314,7 +320,7 @@ class DetectorTests(unittest.TestCase):
         self.assertFalse(item["tradable"])
         self.assertEqual(item["label"], "vigilancia, no operable")
         self.assertEqual(self.read_state()["wakes"], {})
-        self.assertTrue(self.read_state()["watches"])
+        self.assertEqual(self.read_state()["watches"], [])
 
     def test_major_floor_is_3_percent_and_the_rest_stay_at_5(self):
         seen = []
@@ -339,52 +345,15 @@ class DetectorTests(unittest.TestCase):
         self.assertIn("alerta", text)
         self.assertIn("no llega", text)
 
-    def test_repeated_absorption_opens_a_breakout_watch(self):
-        def candles(coin, interval, n_bars):
-            if interval == "15m":
-                return quiet_15m()
-            cs = []
-            price = 100.0
-            for i in range(80):
-                o = price
-                c = price * (1.012 if i % 2 == 0 else 0.988)
-                h = max(o, c) * 1.002
-                l = min(o, c) * 0.998
-                cs.append({"t": i * 3_600_000, "o": o, "h": h, "l": l, "c": c, "v": 10.0})
-                price = c
-            # The confirming spike is the hour that just closed. The live hour is quiet.
-            for idx in (len(cs) - 9, len(cs) - 2):
-                o = cs[idx]["o"]
-                cs[idx] = {
-                    "t": cs[idx]["t"], "o": o, "h": o * 1.004, "l": o * 0.998,
-                    "c": o * 1.003, "v": 200.0,
-                }
-            return cs
 
+    def test_early_signals_do_not_log_or_wake(self):
         calls = []
         detector.send = lambda payload, cfg: calls.append(payload) or "posted"
-        self.assertTrue(self.cycle(
-            [asset("SOPH", pct_24h=10, day=1_270_000)], candle_fn=candles,
-        ))
+        self.assertTrue(self.cycle([asset("SOPH", pct_24h=1.0, day=1_270_000)]))
         self.assertEqual(calls, [])
-        self.assertEqual(self.alerts()[0]["status"], "watch_only")
-        shadow = detector.STATE.parent / "shadow" / "2026-06-15.csv"
-        with shadow.open(encoding="utf-8") as fh:
-            shadow_rows = list(csv.DictReader(fh))
-        self.assertEqual(shadow_rows[0]["coin"], "SOPH")
-        self.assertIn("absorption", shadow_rows[0]["trigger"])
-        item = self.alerts()[0]["alerts"][0]
-        self.assertEqual(item["trigger"], "absorption")
-        self.assertEqual(item["urgency"], "baja")
-        self.assertEqual(item["side"], "long")
-        self.assertGreaterEqual(item["absorption_repeats"], 2)
-        self.assertGreaterEqual(item["absorption_rvol"], 8)
-        watches = [w for w in self.read_state()["watches"] if w.get("status") == "open"]
-        self.assertEqual(len(watches), 1)
-        self.assertEqual(watches[0]["kind"], "absorption")
-        self.assertEqual(watches[0]["side"], "long")
-        self.assertGreater(watches[0]["impulse_high"], watches[0]["impulse_low"])
-
+        self.assertFalse((detector.STATE.parent / "shadow").exists())
+        self.assertEqual(self.read_state()["watches"], [])
+        self.assertIn("Apagada", self.latest())
     def test_15m_early_trigger(self):
         def candles(coin, interval, n_bars):
             if interval == "15m":
@@ -436,9 +405,10 @@ class DetectorTests(unittest.TestCase):
         self.assertIn("alerta", self.latest())
         self.assertNotIn("silencio", self.latest().split("Resultado:")[0])
 
-    def test_daily_and_hourly_caps(self):
+
+    def test_phase1_live_does_not_post_or_spend_the_old_cap(self):
         def forbid_send(*_a, **_k):
-            raise AssertionError("el tope no debe hacer POST")
+            raise AssertionError("la fase 1 no debe hacer POST")
 
         detector.send = forbid_send
         live = load_cfg(phase1_webhook="live")
@@ -447,17 +417,17 @@ class DetectorTests(unittest.TestCase):
             cfg=live,
             state={"marks": [], "last_fire": {}, "wakes": {"2026-06-15": 10}, "wakes_hour": {}},
         ))
-        self.assertEqual(self.alerts()[0]["status"], "daily_cap_logged")
-        self.assertIn("tope", self.latest())
+        self.assertEqual(self.alerts()[0]["status"], "watch_only")
+        self.assertIn("| alerta |", self.latest())
         self.assertEqual(self.read_state()["wakes"]["2026-06-15"], 10)
+        self.assertEqual(self.read_state().get("confluence_wakes") or {}, {})
 
         self.assertTrue(self.cycle(
             [asset("BBB", pct_24h=20)],
             cfg=live,
             state={"marks": [], "last_fire": {}, "wakes": {}, "wakes_hour": {"2026-06-15T12": 2}},
         ))
-        self.assertEqual(self.alerts()[-1]["status"], "hourly_cap_logged")
-
+        self.assertEqual(self.alerts()[-1]["status"], "watch_only")
     def test_cooldown_suppresses_repeat(self):
         self.assertTrue(self.cycle(
             [asset("AAA")],
@@ -468,32 +438,30 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(self.read_state()["last_fire"]["AAA"], NOW - 60)
         self.assertIn("status=none", detector.LOG.read_text(encoding="utf-8"))
 
-    def test_post_failed_does_not_consume_a_slot(self):
-        detector.send = lambda payload, cfg: "post_failed"
+
+    def test_phase1_failure_path_is_not_a_webhook(self):
+        def forbid_send(*_a, **_k):
+            raise AssertionError("la fase 1 no debe hacer POST")
+
+        detector.send = forbid_send
         self.assertTrue(self.cycle([asset("AAA")], cfg=load_cfg(phase1_webhook="live")))
         st = self.read_state()
         self.assertEqual(st["wakes"], {})
         self.assertEqual(st["wakes_hour"], {})
-        self.assertEqual(st["last_fire"], {})
-        self.assertEqual(self.alerts()[0]["status"], "post_failed")
+        self.assertEqual(st["last_fire"]["AAA"], NOW)
+        self.assertEqual(self.alerts()[0]["status"], "watch_only")
 
-    def test_one_post_batches_every_hit_as_one_slot(self):
+    def test_phase1_hits_share_a_log_and_do_not_post(self):
         calls = []
-
-        def record(payload, cfg):
-            calls.append(payload)
-            return "posted"
-
-        detector.send = record
+        detector.send = lambda payload, cfg: calls.append(payload) or "posted"
         self.assertTrue(self.cycle(
             [asset("AAA", pct_24h=30), asset("BBB", pct_24h=12)],
             cfg=load_cfg(phase1_webhook="live"),
         ))
-        self.assertEqual(len(calls), 1)
-        self.assertEqual({p["coin"] for p in calls[0]}, {"AAA", "BBB"})
-        self.assertEqual(self.read_state()["wakes"]["2026-06-15"], 1)
-        self.assertEqual(self.read_state()["wakes_hour"]["2026-06-15T12"], 1)
-
+        self.assertEqual(calls, [])
+        self.assertEqual({p["coin"] for p in self.alerts()[0]["alerts"]}, {"AAA", "BBB"})
+        self.assertEqual(self.read_state()["wakes"], {})
+        self.assertEqual(self.read_state()["wakes_hour"], {})
     def test_prefilter_keeps_the_hottest_and_the_15m_move(self):
         seen = []
 
@@ -634,14 +602,18 @@ class DetectorTests(unittest.TestCase):
         self.assertEqual(self.alerts()[0]["alerts"][0]["trigger"], "3h_escalera")
         self.assertIn("silencio", self.latest())
 
+        calls = []
+        detector.send = lambda payload, cfg: calls.append(payload) or "posted"
         self.assertTrue(self.cycle(
             [asset("STEP")],
             candle_fn=candles,
             cfg=load_cfg(escalera_ignore_quiet_hours=True, phase1_webhook="live"),
             state={"marks": [], "last_fire": {}, "wakes": {}, "wakes_hour": {}},
         ))
-        self.assertEqual(self.alerts()[-1]["status"], "dry_run")
+        self.assertEqual(calls, [])
+        self.assertEqual(self.alerts()[-1]["status"], "watch_only")
         self.assertTrue(self.alerts()[-1]["alerts"][0]["tradable"])
+        self.assertEqual(self.read_state()["wakes"], {})
 
     def test_three_hour_move_enters_the_candle_set(self):
         seen = []
@@ -755,68 +727,25 @@ class DetectorTests(unittest.TestCase):
         self.assertNotIn("SUPERSECRETTOKEN", leaked)
         self.assertNotIn("old-key", leaked)
 
-    def test_entry_ready_posts_and_a_thin_short_does_not(self):
+
+    def test_stored_watch_is_dropped_and_not_posted(self):
         import watch as watchmod
 
         cfg = load_cfg()
-        candles = [
+        long_w = watchmod.build_watch("INIT", "main", "long", "1h_legacy", [
             {"o": 100, "h": 104, "l": 99, "c": 103, "v": 10},
             {"o": 103, "h": 108, "l": 102, "c": 107, "v": 10},
             {"o": 107, "h": 112, "l": 106, "c": 111, "v": 10},
-        ]
-        long_w = watchmod.build_watch("INIT", "main", "long", "1h_legacy", candles, now=NOW - 60, cfg=cfg)
-        mid = (long_w["entry_low"] + long_w["entry_high"]) / 2
+        ], now=NOW - 60, cfg=cfg)
         calls = []
         detector.send = lambda payload, cfg: calls.append(payload) or "posted"
-
-        def candles_for_level(coin, interval, n_bars):
-            if interval == "15m":
-                t0 = NOW * 1000
-                return [{
-                    "t": t0 - (8 - i) * 900_000, "o": mid, "h": mid + 0.1,
-                    "l": mid - 0.1, "c": mid, "v": 1,
-                } for i in range(8)]
-            # One confirmed high at 125, which is also the 24h high. Nothing closer.
-            t0 = NOW * 1000 - 25 * 3_600_000
-            out = []
-            for i in range(26):
-                out.append({
-                    "t": t0 + i * 3_600_000, "o": 99, "h": 125.0 if i == 8 else 100.0,
-                    "l": 98, "c": 99, "v": 1,
-                })
-            return out
-
         self.assertTrue(self.cycle(
-            [asset("INIT", mark=mid, pct_24h=0.2, day=2_000_000)],
-            candle_fn=candles_for_level,
+            [asset("INIT", mark=100, pct_24h=0.2, day=2_000_000)],
             state={"marks": [], "last_fire": {}, "wakes": {}, "wakes_hour": {}, "watches": [long_w]},
         ))
-        self.assertEqual(len(calls), 1)
-        item = calls[0][0]
-        self.assertEqual(item["type"], "entry_ready")
-        self.assertEqual(item["side"], "long")
-        self.assertEqual(item["side_label"], "largo")
-        self.assertEqual(item["trigger"], "1h_legacy")
-        for key in ("entry", "sl", "tp1", "tp2", "rr"):
-            self.assertIn(key, item)
-        self.assertGreaterEqual(item["rr"], 2)
-        self.assertEqual(item["tp1"], 125.0)
-
-        short_w = watchmod.build_watch("MEME", "main", "short", "1h_legacy", [
-            {"o": 110, "h": 111, "l": 104, "c": 105, "v": 1},
-            {"o": 105, "h": 106, "l": 100, "c": 101, "v": 1},
-            {"o": 101, "h": 102, "l": 96, "c": 97, "v": 1},
-        ], now=NOW - 60, cfg=cfg)
-        short_mid = (short_w["entry_low"] + short_w["entry_high"]) / 2
-        calls.clear()
-        self.assertTrue(self.cycle(
-            [asset("MEME", mark=short_mid, pct_24h=0.2, day=2_000_000, funding=0.0)],
-            state={"marks": [], "last_fire": {}, "wakes": {}, "wakes_hour": {}, "watches": [short_w]},
-        ))
         self.assertEqual(calls, [])
-        self.assertEqual(self.read_state()["watches"][0]["status"], "open")
-        self.assertIn("corto no enviado", detector.LOG.read_text(encoding="utf-8"))
-
+        self.assertEqual(self.read_state()["watches"], [])
+        self.assertNotIn("entry_ready", detector.LOG.read_text(encoding="utf-8"))
     def test_short_rule_blocks_crowded_funding_and_a_thin_hip3_book(self):
         cfg = load_cfg()
         base = {"side": "short", "day_ntl": 6_000_000, "oi_usd": 2_000_000, "dex": "main", "funding_pct": -0.005}
@@ -833,7 +762,7 @@ class DetectorTests(unittest.TestCase):
         self.assertTrue(self.cycle([asset("AAA")], cfg=load_cfg(phase1_webhook="watch")))
         self.assertEqual(calls, [])
         self.assertEqual(self.alerts()[0]["status"], "watch_only")
-        self.assertTrue(self.read_state()["watches"])
+        self.assertEqual(self.read_state()["watches"], [])
         self.assertEqual(self.read_state()["wakes"], {})
 
     def test_send_dry_run_does_not_call_the_network(self):

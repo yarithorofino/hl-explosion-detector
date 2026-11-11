@@ -1,74 +1,60 @@
 # Detector de explosiones (Hyperliquid)
 
-Este programa mira los perpetuos de Hyperliquid (el mercado principal y los de HIP-3) y avisa cuando uno se mueve de golpe con mucho volumen. No compra ni vende nada. Solo avisa.
+Este programa mira los perpetuos de Hyperliquid (el mercado principal y los de HIP-3, nunca el spot) y avisa cuando tres cosas técnicas se cumplen a la vez en una hora. No compra ni vende. Solo avisa.
 
-Antes corría en un ordenador que se duerme. Ahora lo ejecuta GitHub cada 15 minutos, también con el ordenador apagado.
+GitHub lo ejecuta cada 15 minutos. El horario y las pasadas de cada arranque no han cambiado.
 
-Lo que llama al webhook, y por tanto despierta el análisis de pago, es `entry_ready`: el precio ha llegado a la zona, con entrada, stop, dos objetivos y un cobro de al menos el doble del riesgo. Lleva `side` (`long` o `short`) y `side_label` (`largo` o `corto`), más el disparo que abrió la vigilancia. El primer objetivo es el primer máximo o mínimo real que hay por delante (un giro de las velas de 1 hora, o el máximo o mínimo de las últimas 24 horas, el que esté más cerca). El segundo objetivo es el siguiente. El cobro se calcula con el precio de ahora contra ese primer nivel; si no llega a 2, no se envía. Un largo tampoco se envía si la última hora ya cerrada tiene una mecha superior de más de la mitad de su rango en la entrada o por encima, ni si el precio ha caído más de un 15% en los últimos 30–60 minutos y no ha hecho una base.
+Lo único que llama al webhook, y por tanto despierta el análisis de pago, es `confluence_1h`.
 
-La fase 1 (las reglas de abajo) se anota y abre esa vigilancia, y **no llama al webhook**. Da igual que el libro sea operable: el aviso de hoy llegaba con el movimiento ya hecho. `phase1_webhook` vale `"watch"`. `"tradable"` vuelve a llamar solo si el volumen de 24 horas pasa de 1 millón. `"live"` restaura el aviso de antes para todos los nombres.
+## Qué se mira
 
-Las señales tempranas (absorción, volumen relativo, compresión, interés abierto, delta y funding) se calculan y se apuntan en `data/shadow/`, y salen en el resumen de la pasada, pero **no llaman al webhook**. Cada una tiene su interruptor en la configuración (`shadow` o `live`). En `live`, y solo si la puntuación llega al mínimo, esa señal sí puede llamar. Una vigilancia de absorción, aunque esté en sombra, sí puede acabar en `entry_ready`.
+En cada pasada entran **todos** los perpetuos con volumen de 24 horas de al menos **5 millones de dólares**. En un mercado HIP-3, además, el interés abierto tiene que ser de al menos **1 millón**. El spot no se pide.
 
-Un corto solo se envía si el volumen de 24 horas es de al menos **5 millones**, y en HIP-3 además el interés abierto es de al menos **1 millón**, y el funding no es de −0,01%/h o más negativo (ahí el corto ya está pagando). De **00:00 a 08:00** (Madrid) no hay ninguna llamada. La vigilancia y la sombra siguen de noche. Si a las 8 la zona sigue siendo válida, `entry_ready` sale entonces.
+La hora no espera a que el reloj la cierre. Se arma con las **últimas 4 velas de 15 minutos ya cerradas** (una hora entera de precio y de volumen) y se compara con las velas de 1 hora ya cerradas que terminan antes de que empiece esa ventana. A en punto, esa hora corrida es la hora que acaba de cerrar. A y cuarto, y media y menos cuarto, la ruptura se ve en ese cuarto de hora. El volumen no se prorratea: un trozo de hora multiplicado por cuatro convertiría un pico de 15 minutos en un falso clímax.
 
-El estudio de la semana del 10 nov está en `reports/replay_2026-11-10.md`. Para el repaso del 24 nov: `python3 shadow_report.py --fetch`.
+Hace falta las tres cosas, en largo:
 
-Además, cada pasada mira los perps con al menos 1 millón de dólares de volumen (el principal y los HIP-3, nunca el spot) buscando una preparación operable. Hay dos de continuación de tendencia, copiadas de métodos conocidos: la ruptura de las 20 velas de 1 hora del sistema de las Tortugas (Donchian; Richard Dennis), con la media de 20 por encima de la de 50 y el volumen al menos 1,5 veces la media de esas 20 velas; y el retroceso hasta la media de 20 dentro de esa tendencia, con mínimos crecientes. El stop inicial es el más ancho entre 2 ATR (el ATR de Wilder, el que usan las Tortugas y el Chandelier) y el último giro. El trailing es el Chandelier Exit de Charles LeBeau, 3 ATR, y solo empieza cuando el precio lleva +1R; la mitad se puede cerrar en +2R. Una ruptura o un retroceso no exige un objetivo en el primer máximo cercano: en una ruptura ese máximo está pegado al precio y el R:R sale falso. Solo se descarta si el máximo o mínimo de 24 horas o de 7 días, en velas de 4 horas ya cerradas, queda a menos de 1R de la entrada. Esa continuación, en 1h y en 4h, solo se toma a favor de Bitcoin: largo si el cierre de 4h de BTC está por encima de su EMA200 de 4h, corto si está por debajo. La misma ruptura de 20 velas se mira también en el gráfico de 4 horas, con el stop inicial de 2 ATR de esas velas y el mismo Chandelier. Esos números no se han ajustado mirando noviembre. El retest de soporte sí exige el primer nivel real y un cobro de al menos el doble. La tercera preparación es un largo de retest de un soporte ya tocado (el precio a menos de un 0,3%), con mínimos de 4 horas crecientes. Si las últimas horas hacen máximos cada vez más bajos y el último de esos máximos queda por debajo del primer objetivo, se descarta: es el caso de kPEPE el 11 nov, con el último máximo en 0,005351 y el objetivo en 0,00545. Un corto pide las mismas condiciones de siempre (5 millones, y en HIP-3 un millón de interés abierto, y el funding por encima de −0,01%/h). Si el funding pasa de 0,01%/h o la prima de +0,1%, la confianza baja un punto. No hace falta ninguna señal de X. Cada nombre espera 4 horas, de noche no se envía, y hay un cupo propio de 6 al día. `setup_scanner` vale `shadow`: se calcula y se guarda en `data/setups/`, y no llama al webhook hasta que se ponga `live`. El estudio de 14 días está en `reports/setup_backtest_2026-11-11.md`.
+1. **Tendencia.** El cierre de esa hora está por encima de la EMA20 de 1h, y la EMA20 está por encima de la EMA50.
+2. **Ruptura.** Ese cierre está por encima del máximo de las 20 velas de 1h cerradas anteriores (canal de Donchian).
+3. **Volumen con presión agresiva.** El nocional de esa hora es al menos **1,5 veces** la media de esas 20 horas, y en esa hora el agresor compró más de lo que vendió (delta: compras menos ventas).
 
-Avisa igual si el precio sube o si baja. Salta si se cumple **cualquiera** de estas reglas (el aviso dice cuáles):
+El corto es el espejo (cierre por debajo de la EMA20, EMA20 por debajo de la EMA50, cierre por debajo del mínimo de 20, el mismo volumen y más venta agresiva que compra) y, además, el funding tiene que estar **por encima de −0,01%/h**. Si el funding no viene o es igual o más negativo, el corto no sale. El largo no mira el funding.
 
-- **Hora contra su propio rango (1h_atr).** El movimiento de la última hora es al menos **3 veces** el ATR de 14 velas de 1 hora (el rango típico, en %) y, además, no baja de un suelo: **3%** si es un grande y **5%** en el resto. El volumen de esa vela es al menos **5 veces** la media de las 24 horas anteriores y al menos **100.000 dólares**.
-- **Hora fija (1h_legacy).** El movimiento de la última hora es de al menos **8%**, con el mismo volumen (5 veces la media y 100.000 dólares). Sirve cuando la moneda ya iba muy movida y el ATR pide un salto enorme.
-- **Quince minutos (15m_early).** El movimiento de la vela de 15 minutos es de al menos **4%**, con un volumen de al menos **5 veces** la media de las velas de 15 minutos de las 24 horas anteriores y al menos **25.000 dólares**.
-- **Escalera de 3 horas (3h_escalera).** La suma del recorrido de las 3 últimas velas de 1 hora (de la apertura de la primera al cierre de la última) es de al menos **10%**. Al menos 2 de esas 3 cierran en esa dirección y marcan máximos más altos (o mínimos más bajos). No pide múltiplo de volumen. El aviso lleva `label: "escalera"`. `tradable` sigue la regla del millón. De noche se calla igual que el resto, salvo que en la configuración se ponga `escalera_ignore_quiet_hours` a true.
-- **Absorción (absorption), en sombra.** Solo si el volumen de 24 horas es de al menos **1 millón**. La vela de 1 hora mueve al menos **8 veces** la mediana y **8 veces** la media de las 48 horas anteriores, el cierre a cierre se queda por debajo del **1%** y el rango de la vela por debajo del **2%**. Una sola vela no abre vigilancia. Si se repite dentro de esas 48 horas, abre una vigilancia de urgencia baja (no llama al webhook) y espera a que el precio salga del rango. La dirección sale de dónde cierra la vela, o del desequilibrio de agresores cuando esa muestra existe.
+El delta no viene en las velas. `recentTrades` solo devuelve los últimos intercambios de unos segundos, así que no se usa como si fuera la hora. Cada ejecución escucha la cinta pública (`trades` por websocket; el lado B es compra agresiva y el lado A es venta). La cobertura de una moneda **empieza cuando el servidor confirma la suscripción**, no cuando se envía: si no hay confirmación, esa hora no cuenta como vista. Para avisar hace falta haber visto al menos el **95%** de la hora, con un hueco de como mucho **3 minutos** (el arranque de Actions entre un trabajo y el siguiente). Si no llega, la fila dice `sin_delta` y **no hay POST**.
 
-Grandes, con suelo del 3%: BTC, ETH y SOL (el nombre exacto del mercado) y, en el mercado principal, cualquier perp cuyo volumen de 24 horas sea de **100 millones de dólares** o más. Un mercado HIP-3 no se vuelve grande solo por volumen. La lista y el umbral están en `data/detector_config.json`.
+Tampoco se avisa si el precio de ahora ya está a más de **2 ATR** de 1 hora más allá del nivel de ruptura. Dos es el mismo múltiplo que el stop mínimo: más lejos que eso, la entrada llega tarde. Como un aviso válido está como mucho a 2 ATR del nivel, el stop de 2 ATR queda en el nivel o por debajo. Si el último giro queda más lejos, el stop se abre hasta ese giro.
 
-Para poder avisar hace falta liquidez: volumen de 24 horas de al menos **300.000 dólares**. Si no es el mercado principal (HIP-3), además el interés abierto tiene que ser de al menos **500.000 dólares**.
+Cada moneda espera **4 horas** después de un aviso. Hay como máximo **8 despertares al día**: cada POST es un despertar, aunque lleve varias monedas. De **00:00 a 08:00** (Madrid) no hay POST. Se anota `quiet` y, si a las 8 la hora sigue siendo válida, puede salir entonces. La pausa de 4 horas no se gasta de noche.
 
-Si el volumen de 24 horas es de menos de **1 millón**, la fase 1 va marcada `tradable: false` y `label: "vigilancia, no operable"`. A partir de 1 millón va `tradable: true` y `label: "operable"`. En los dos casos se anota y abre vigilancia, y no llama al webhook.
+El aviso lleva la moneda, el dex, el lado, las tres confluencias (EMA20, EMA50, nivel Donchian, múltiplo de volumen y delta), la marca, el volumen de 24 horas, el interés abierto, el funding, la prima, el ATR, una entrada (la marca de ahora), el stop, y TP1/TP2. Si hay un máximo o un mínimo estructural por delante, el objetivo es ese y el R:R se calcula desde la marca. Si no lo hay, TP1 está a 2R y TP2 a 3R del stop (`tp_kind`: `estructural`, `mixto` o `medido`).
 
-Si la mecha de rechazo de la vela que dispara (la de arriba cuando sube, la de abajo cuando baja) ocupa más del **50%** del rango, el aviso lleva `exhaustion_flag: true` y `exhaustion_label: "posible agotamiento"`.
+La fase 1 antigua (el salto de 1 hora, el de 15 minutos y la escalera) puede seguir saliendo en la tabla del ciclo, pero **no llama al webhook**. Las señales tempranas (absorción, volumen relativo, compresión, interés abierto, delta de absorción y funding) están apagadas: no se calculan y no hay repaso de sombra del 24 nov. Las preparaciones (`setup_scanner`) y el aviso `entry_ready` también están apagados.
 
-Si en el mismo cuarto de hora saltan varios, van todos en la misma anotación. El mismo activo no abre otra vigilancia hasta pasadas **4 horas**. La escalera tiene su propia pausa de 4 horas, así una escalera no impide, una hora después, el aviso del 8% o el de 15 minutos. Esos cupos de **10 al día** y **2 por hora** solo cuentan cuando la fase 1 vuelve a llamar al webhook (`tradable` o `live`). `entry_ready` no los gasta. De **00:00 a 08:00** (hora de Madrid) no hay ninguna llamada; a las 8, `entry_ready` puede salir si la zona sigue válida. La prueba manual no gasta esos cupos.
+El recuento hasta el 24 nov está en `data/confluence/` de la rama `detector-state`: una fila por aviso enviado, en silencio, sin delta, extendido o parado por el cupo. Se guardan 21 días.
+
+El estudio de velas de 1h de los últimos 14 días (sin delta, y solo en los 30 perps líquidos con más volumen, para caber en el cupo de la API) está en `reports/confluence_replay_2026-11-11.md`. El directo mira todos los que pasan el filtro, no solo esos 30.
 
 ## Qué tienes que hacer tú
 
 1. En este pull request, pulsa **Merge** para juntarlo con `main`. Hasta que no esté en `main`, el horario no arranca.
-2. Crea los dos secretos de abajo. Sin ellos el detector sigue mirando el mercado, pero no envía nada (en el registro pone `dry-run`).
-3. Permite que Actions escriba en el repositorio (si no, el último paso falla y el detector olvida lo que vio). Abajo está el sitio exacto.
+2. Crea los dos secretos de abajo. Sin ellos el detector sigue mirando, pero no envía nada (en el registro pone `dry-run`). Un dry-run de una confluencia de verdad cuenta como despertar del día, para no repetir el mismo aviso cada cuarto de hora.
+3. Permite que Actions escriba en el repositorio. Abajo está el sitio exacto.
 4. Lanza la prueba manual del webhook.
-5. Cuando esa prueba salga bien, **para la copia del ordenador**. Si las dos siguen activas, el aviso puede llegar dos veces cuando el ordenador esté despierto.
+5. Cuando esa prueba salga bien, **para la copia del ordenador**. Si las dos siguen activas, el aviso puede llegar dos veces.
 
 ### Los dos secretos
-
-Los nombres tienen que ser exactamente estos, en mayúsculas:
 
 ```
 EXPLOSION_WEBHOOK_URL
 EXPLOSION_WEBHOOK_AUTH
 ```
 
-Dónde crearlos:
+Dónde crearlos: este repositorio → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**.
 
-1. Abre este repositorio en GitHub.
-2. **Settings** (en la interfaz en español: **Configuración**).
-3. En el menú de la izquierda, **Secrets and variables** (**Secretos y variables**).
-4. **Actions**.
-5. **New repository secret** (**Nuevo secreto de repositorio**).
+- **EXPLOSION_WEBHOOK_URL**: solo la dirección, la que empieza por `https://`.
+- **EXPLOSION_WEBHOOK_AUTH**: la línea entera de la cabecera, por ejemplo `Authorization: Bearer xxxxx`.
 
-Qué pegar en cada uno:
-
-- **EXPLOSION_WEBHOOK_URL**: solo la dirección del webhook, la que empieza por `https://`.
-- **EXPLOSION_WEBHOOK_AUTH**: la línea entera de la cabecera, tal como la copias del panel. Por ejemplo:
-
-```
-Authorization: Bearer xxxxx
-```
-
-Sin comillas. Puedes dejar el espacio de después de los dos puntos; el programa lo recorta. No pongas la dirección ni el token en este README, en el código, ni en un mensaje o una issue: este repositorio es público y cualquiera podría leerlo. GitHub guarda los secretos cifrados y el programa no los escribe en el registro.
+Sin comillas. El programa no escribe la dirección ni el token en el registro. No los pongas en este README, en el código, ni en una issue: el repositorio es público.
 
 ### Permiso para guardar la memoria
 
@@ -76,25 +62,18 @@ Sin comillas. Puedes dejar el espacio de después de los dos puntos; el programa
 2. En **Workflow permissions**, elige **Read and write permissions**.
 3. Pulsa **Save**.
 
-Sin esto, el paso **Guardar estado** falla con un error 403 y cada ejecución empieza de cero.
+Sin esto, el paso **Guardar estado** falla con un 403 y cada ejecución empieza de cero.
 
 ### Probar el webhook a mano
 
-1. Pestaña **Actions**.
-2. A la izquierda, **Detector de explosiones**. Si GitHub pide activar Actions la primera vez, acéptalo.
-3. **Run workflow** (en español: **Ejecutar workflow**).
-4. Deja la rama en **main**.
-5. Marca la casilla **Enviar un POST de prueba al webhook**.
-6. Pulsa el botón verde para lanzarlo.
-7. Entra en esa ejecución. Arriba sale un resumen en castellano. Abre el job **detectar** y el paso **Pasadas del detector**. La casilla de prueba hace **una sola pasada**, no el bucle de una hora.
-8. Busca esta línea:
-   - `force_test status=posted` → el webhook ha respondido. La prueba ha llegado.
-   - `force_test status=dry_run` → faltan los secretos, o el nombre no coincide.
-   - `force_test status=post_failed` y cerca `webhook error: HTTP 401` o `403` → la línea del secreto `EXPLOSION_WEBHOOK_AUTH` no es la que espera el webhook. Vuelve a copiarla.
+1. **Actions** → **Detector de explosiones** → **Run workflow**.
+2. Rama **main**. Marca **Enviar un POST de prueba al webhook**.
+3. En el job **detectar**, paso **Pasadas del detector**:
+   - `force_test status=posted` → el webhook ha respondido.
+   - `force_test status=dry_run` → faltan los secretos.
+   - `force_test status=post_failed` con HTTP 401 o 403 → la cabecera no es la que espera el webhook.
 
-La prueba manda una lista con un solo objeto que dice que es una prueba, no un movimiento real. No gasta el cupo del día ni el de la hora, y se puede lanzar de madrugada.
-
-Ejemplo de lo que recibe el webhook en la prueba:
+La prueba no gasta el cupo ni la pausa, y se puede lanzar de madrugada. Manda un solo objeto de prueba:
 
 ```json
 [
@@ -107,114 +86,94 @@ Ejemplo de lo que recibe el webhook en la prueba:
 ]
 ```
 
-Un aviso de verdad tiene esta forma (varios activos irían uno detrás de otro, en la misma lista, en un solo POST). `funding_pct` y `premium_pct` van en porcentaje por hora (el dato de Hyperliquid es un decimal; 0,0000125 pasa a 0,00125%). `oi_change_1h_pct` es el cambio del interés abierto frente a hace una hora, o `null` si todavía no hay ese recuerdo. `trigger` junta los que hayan saltado: `1h_atr`, `1h_legacy`, `15m_early` y `3h_escalera`. `pct_3h` es el recorrido de esas 3 velas. `floor_pct` es el suelo de 1 hora de ese activo (3 o 5). `early_floor_pct` es el 4% del disparo de 15 minutos, cuando ese disparo ha saltado.
+Un aviso de verdad es una lista. Si en el mismo cuarto de hora saltan varias monedas, van todas en ese único POST. `funding_pct` y `premium_pct` van en porcentaje por hora. `delta` es el nocional comprado menos el vendido en esa hora. `delta_coverage` es la fracción de la hora que la cinta llegó a ver.
 
 ```json
 [
   {
-    "dex": "main",
+    "type": "confluence_1h",
     "coin": "BTC",
-    "trigger": "1h_atr",
-    "pct_1h": 4.2,
-    "pct_15m": 1.1,
-    "atr_pct": 0.8,
-    "floor_pct": 3.0,
-    "early_floor_pct": null,
-    "vol_1h_usd": 2500000,
-    "vol_mult": 6.2,
-    "mark": 100000,
-    "dayNtlVlm": 80000000,
-    "oi_usd": 12000000,
-    "oi_change_1h_pct": 3.5,
+    "dex": "main",
+    "side": "long",
+    "side_label": "largo",
+    "ema20": 98420.5,
+    "ema50": 97110.2,
+    "donchian": 99150.0,
+    "vol_mult": 1.8,
+    "delta": 12500000.0,
+    "buy_ntl": 48000000.0,
+    "sell_ntl": 35500000.0,
+    "delta_coverage": 0.98,
+    "mark": 99540.0,
+    "dayNtlVlm": 2500000000.0,
+    "oi_usd": 1800000000.0,
     "funding_pct": 0.00125,
     "premium_pct": -0.0364,
-    "wick_ratio": 22.0,
-    "exhaustion_flag": false,
-    "exhaustion_label": null,
-    "tradable": true,
-    "label": "operable",
-    "maxLeverage": 40,
+    "atr": 420.0,
+    "entry": 99540.0,
+    "sl": 98700.0,
+    "sl_kind": "2atr",
+    "tp1": 101220.0,
+    "tp2": 102060.0,
+    "rr": 2.0,
+    "rr_tp2": 3.0,
+    "tp_kind": "medido",
+    "extension_atr": 0.93,
     "detected_at_madrid": "2026-06-15 14:15"
   }
 ]
 ```
 
-## Cómo leer una ejecución normal
+## Cómo leer una ejecución
 
-En **Actions** → **Detector de explosiones** → la ejecución → job **detectar** → paso **Pasadas del detector**. Si el trabajo ha hecho varias pasadas, el resumen de arriba repite la tabla, una por cuarto de hora.
+En **Actions** → **Detector de explosiones** → job **detectar** → **Pasadas del detector**.
 
-Arriba del run, el resumen en castellano trae la hora de Madrid, cuántos perpetuos miró, cuántos candidatos hubo, cuántas velas pidió y una tabla. Cada fila es un candidato, con dex, moneda, movimiento de 15 minutos, de 1 hora, de 3 horas y de 24 horas, el múltiplo de volumen de 1 hora, el volumen de 24 horas, el interés abierto, el funding, el ATR, el suelo, qué disparo ha saltado (`disparo`) y el resultado:
+La primera tabla es la fase 1, que ya no despierta nada. Debajo está la de la confluencia, que sí puede hacer POST.
 
-| Resultado | Qué ha pasado |
+| Estado | Qué ha pasado |
 | --- | --- |
-| `alerta` | Cumple y entra en el aviso de esta tanda. |
-| `no llega` | Se miró y no cumple. |
-| `pausa` | Cumpliría, pero ese activo avisó hace menos de 4 horas. |
-| `silencio` | Cumple, pero es de noche (00:00–08:00). Queda anotado y no se envía. |
-| `tope` | Cumple, pero ya van 10 avisos hoy o 2 en esta hora. |
-| `sin velas` | La API no devolvió las velas de ese nombre. |
-| `fuera del top` | Pasó el filtro previo, pero este ciclo solo pide velas de los 25 más movidos. |
-
-La misma tabla queda guardada para mirarla después (ver más abajo). En el texto del paso también hay una línea corta:
+| `posted` | Se envió el webhook. |
+| `dry_run` | Había confluencia, pero faltan los secretos. Cuenta como despertar y deja la pausa de 4 horas. |
+| `quiet` | De noche. Anotado, sin POST. No gasta la pausa. |
+| `tope` | Ya van 8 despertares hoy. |
+| `post_failed` | El POST falló. No gasta cupo ni pausa. |
+| `sin_delta` | Precio y volumen sí, pero la cinta no cubre la hora. No se envía. |
+| `sin_presion` | Hay delta, pero no empuja el lado de la ruptura. No se envía. |
+| `extendido` | El precio ya está a más de 2 ATR del nivel. |
+| `veto_funding` | El corto no pasa el funding. |
 
 ```
-candidatos=12 velas=24 hits=1 enviados=1 status=posted ['XYZ']
+confluencia universo=78 velas=140 filas=1 enviados=1 status=posted
 ```
 
-Qué significa `status`:
-
-| Valor | Qué ha pasado |
-| --- | --- |
-| `none` | Nada que avisar. |
-| `posted` | El webhook ha respondido bien. |
-| `dry_run` | Había una señal, pero faltan los secretos. Aun así cuenta como aviso del día y de la hora. |
-| `post_failed` | Se intentó enviar y falló. No cuenta: si la señal sigue, lo reintenta en el siguiente ciclo. |
-| `watch_only` | La fase 1 quedó anotada y abrió vigilancia. No se ha llamado al webhook. |
-| `quiet_hours_logged` | Es de noche. Queda anotado y no se envía. |
-| `daily_cap_logged` | Ya se han enviado los 10 avisos de hoy. |
-| `hourly_cap_logged` | Ya se han enviado los 2 avisos de esta hora. |
-
-Si hay muchos activos moviéndose a la vez, solo pide velas de los **25** más movidos (vela de 1 hora y vela de 15 minutos). Para no perderse un salto de 15 minutos ni una escalera lenta, entra como candidato quien se haya movido un **3%** desde la pasada anterior (unos 15 minutos), un **2%** frente a hace una hora, un **6%** frente a hace unas 3 horas, o un **8%** en 24 horas. En la primera ejecución todavía no hay precios guardados, así que solo entra el movimiento de 24 horas; a partir de la segunda ya compara con el cuarto de hora anterior.
+`enviados` es el número de monedas del POST. El cupo suma 1 por POST. La fase 1, cuando anota, puede decir `watch_only`: eso no es un envío.
 
 ## Dónde se guarda la memoria
 
-Entre una ejecución y la siguiente hay que recordar los precios anteriores, qué activo está en pausa de 4 horas y cuántos avisos van hoy. Eso no puede vivir en el disco del ordenador, y tampoco conviene un commit en `main` cada 15 minutos.
+En la rama **`detector-state`**, reescrita en cada pasada. No lleva secretos.
 
-Se guarda en una rama aparte, **`detector-state`**. Esa rama solo tiene el último recuerdo (se reescribe cada vez), así el historial del proyecto no se llena. Dos ejecuciones no pueden escribir a la vez: GitHub deja correr solo una, y al guardar se comprueba que nadie haya escrito en medio. Si la comprobación no cuadra, no se pisa lo que ya había.
+- `data/detector_state.json` — pausas, cupo y la cinta agregada
+- `signals/explosion_alerts.jsonl` — historial corto
+- `data/scans/` — tabla de la fase 1 (14 días)
+- `data/confluence/AAAA-MM-DD.csv` — filas de confluencia (21 días)
+- `LEEME.txt`
 
-En esa rama están:
-
-- `data/detector_state.json` — la memoria (precios, interés abierto, pausas y cupos)
-- `signals/explosion_alerts.jsonl` — un historial corto de avisos (como mucho unos cientos de líneas)
-- `data/scans/latest.md` — la tabla del último ciclo, igual que el resumen de Actions
-- `data/scans/AAAA-MM-DD.csv` — una fila por candidato y por ciclo, para estudiarlo en una hoja de cálculo. Solo se guardan los últimos **14 días**
-- `LEEME.txt` — una nota que dice que no hay que editar esos ficheros a mano
-
-No hace falta abrirla para el día a día. El registro de Actions basta. La rama es pública, como el resto del repositorio: tiene movimientos de mercado, no la URL ni la clave del webhook.
-
-Si un ciclo no consigue leer Hyperliquid, no toca esa memoria. El fallo se ve en rojo y el recuerdo anterior sigue igual.
+`data/shadow/` ya no se escribe. Si un ciclo no lee Hyperliquid, no toca esa memoria.
 
 ## Horario
 
-El reloj de GitHub va en UTC y el fichero pide un arranque cada 15 minutos (`*/15 * * * *`). En este repositorio público GitHub a menudo **no lo arranca cada cuarto de hora**: las ejecuciones automáticas pueden quedar separadas unos 60 minutos (por ejemplo 03:33, 04:30, 05:35).
+El cron es `*/15 * * * *` (UTC). En este repositorio público GitHub a menudo arranca el horario solo una vez por hora, así que cada arranque hace **5 pasadas**: al empezar, y luego en el :00, :15, :30 y :45 más 20 segundos, sin pasar de unos 60 minutos. El tope del job es 70 minutos.
 
-Por eso cada arranque no mira el mercado una vez: hace **5 pasadas**. La primera es en cuanto empieza. Luego espera al siguiente minuto :00, :15, :30 o :45, más 20 segundos para que la vela de 15 minutos ya esté cerrada, y vuelve a mirar. Con cinco pasadas entra también el :45; con cuatro el trabajo se quedaba en el :30 y el :45 quedaba sin vigilar unos 25 minutos. No empieza una pasada nueva si el trabajo ya lleva unos 60 minutos. El tope del job es 70 minutos, para que la última pasada pueda terminar. Un arranque a las 08:55 mira hacia las 08:55, 09:00, 09:15, 09:30 y 09:45.
+Durante el trabajo, un proceso aparte escucha la cinta. Cada pasada la guarda. Si la escucha se cae, el ciclo sigue y esas horas quedan en `sin_delta`.
 
-Después de **cada** pasada se guarda la memoria en la rama `detector-state` (pausas, cupos, precios) y la fila del CSV. La siguiente pasada vuelve a leer esa rama, así no se repite un aviso ni se saltan los topes (10 al día, 2 por hora, 4 horas por activo, silencio de 00:00 a 08:00).
+Después de cada pasada se guarda la rama `detector-state`. Si llega otro trabajo, espera; el que corre, al terminar una pasada, le deja el sitio.
 
-Si GitHub llega a lanzar otro trabajo mientras este sigue en marcha, el nuevo espera. No corta al que está guardando. Cuando el que corre termina una pasada y ve que hay otro en la cola, deja el sitio: no duerme hasta el siguiente cuarto de hora. El que esperaba sigue desde ese momento. Así no se barren dos veces los mismos cuartos, y si aun así coinciden un instante, la pausa de 4 horas evita el aviso duplicado.
-
-Para lanzarlo a mano: **Run workflow**. El número de pasadas sale en 5. Márcalo a 1 si solo quieres un vistazo. La casilla del POST de prueba ignora ese número y hace una sola pasada.
-
-En un repositorio público, GitHub **apaga los horarios si pasan 60 días sin actividad** en el repositorio. Cada ejecución que guarda estado deja un commit en `detector-state`, y un commit es actividad, así que mientras el detector funcione no deberían cumplirse esos 60 días. Si aun así lo apaga (suele avisar por correo), la pantalla de Actions enseña un aviso y un botón **Enable workflow** (**Habilitar workflow**). Pulsa ese botón y, si quieres, lanza una ejecución manual para no esperar al siguiente cuarto de hora.
-
-El horario solo funciona con el fichero en `main`. En repos públicos, los minutos de Actions no se cobran.
+En un repositorio público GitHub apaga los horarios tras 60 días sin actividad. Guardar estado es un commit, así que mientras el detector funcione no deberían cumplirse. El horario solo corre con el fichero en `main`.
 
 ## Si algo falla
 
-- El paso **Pasadas del detector** dice `dry-run` → revisa que los dos secretos existan y que los nombres sean exactos.
-- `webhook error: HTTP 401` o `403` → vuelve a pegar `EXPLOSION_WEBHOOK_AUTH`, la línea completa, sin comillas.
-- **Guardar estado** en rojo con `403` o `Permission denied` → falta el permiso **Read and write permissions** de la sección de arriba.
-- No aparece ninguna ejecución → el pull request no está fusionado en `main`, Actions está desactivado, o el horario se apagó por los 60 días.
-
-Para volver a lanzarlo a mano: **Actions** → **Detector de explosiones** → **Run workflow**. Sin la casilla hace las pasadas que pongas (5 si no cambias el número). Con la casilla manda el POST de prueba y solo hace una pasada.
+- `dry-run` → revisa los dos secretos.
+- HTTP 401 o 403 → vuelve a pegar `EXPLOSION_WEBHOOK_AUTH`, la línea completa.
+- **Guardar estado** con 403 → falta **Read and write permissions**.
+- No hay ejecuciones → el pull request no está en `main`, o el horario se apagó.
+- Muchas filas `sin_delta` al principio → la cinta todavía no ha cubierto una hora. No se envían.

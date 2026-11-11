@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Summarise the shadow log for the 24 Nov review.
+"""Retired. Early-signal shadow rows are no longer written.
+
+The 24 Nov count is data/confluence/ on the detector-state branch.
+This script only reads a leftover data/shadow/ folder.
+
+Summarise the shadow log for the 24 Nov review.
 
 Reads data/shadow/YYYY-MM-DD.csv. Counts hits per trigger. When later prices
 are available, measures how many hours until a 4% move in the signal's

@@ -75,6 +75,8 @@ for rel in listing.stdout.splitlines():
         rel.startswith("data/shadow/") and len(name) == 14 and name.endswith(".csv") and name[4] == "-" and name[7] == "-"
     ) or (
         rel.startswith("data/setups/") and len(name) == 14 and name.endswith(".csv") and name[4] == "-" and name[7] == "-"
+    ) or (
+        rel.startswith("data/confluence/") and len(name) == 14 and name.endswith(".csv") and name[4] == "-" and name[7] == "-"
     )
     if not ok_scan:
         continue
