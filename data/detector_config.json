@@ -98,7 +98,18 @@
   "knife_drop_pct": 15.0,
   "knife_min_minutes": 30,
   "knife_max_minutes": 60,
+  "setup_scanner": "shadow",
+  "setup_donchian": 20,
+  "setup_vol_mult": 1.5,
+  "setup_ema_fast": 20,
+  "setup_ema_slow": 50,
+  "setup_atr_mult": 2.0,
+  "setup_chandelier_atr": 3.0,
+  "setup_support_pct": 0.3,
+  "setup_max_per_day": 6,
+  "setup_funding_hot_pct": 0.01,
+  "setup_premium_hot_pct": 0.1,
   "webhook_auth_header": "Authorization",
   "webhook_auth_format": "Bearer {key}",
-  "_note": "La fase 1 (1h_atr, 1h_legacy, 15m_early, 3h_escalera) anota y abre vigilancia. phase1_webhook=watch: no llama al webhook. tradable llama solo si el libro ya es operable (1M$). live restaura el aviso de antes para todos. Las senales tempranas estan en shadow y no llaman; pasar una a live la promueve. entry_ready si llama, con R:R >= 2. Un corto exige 5M$ de volumen 24h, en HIP-3 OI >= 1M$, y funding por encima de -0.01%/h. De noche no hay POST. URL y cabecera por EXPLOSION_WEBHOOK_URL y EXPLOSION_WEBHOOK_AUTH."
+  "_note": "La fase 1 anota y abre vigilancia; phase1_webhook=watch no llama. setup_scanner=shadow calcula preparaciones (ruptura Donchian 20, retroceso a la EMA20, retest de soporte) y no llama; live si llama, con cupo propio de 6 al dia. entry_ready y un setup en live son lo que despierta el analisis. URL y cabecera por EXPLOSION_WEBHOOK_URL y EXPLOSION_WEBHOOK_AUTH."
 }
