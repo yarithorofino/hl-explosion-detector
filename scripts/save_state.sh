@@ -73,6 +73,11 @@ if setups.exists():
     for child in setups.iterdir():
         if child.is_file():
             abort_if_secret(child.read_text(encoding="utf-8", errors="replace"), f"la preparacion {child.name}")
+conf = Path("data/confluence")
+if conf.exists():
+    for child in conf.iterdir():
+        if child.is_file():
+            abort_if_secret(child.read_text(encoding="utf-8", errors="replace"), f"la confluencia {child.name}")
 print(f"estado valido: marcas={len(d['marks'])} cooldowns={len(d['last_fire'])} dias_wake={len(d['wakes'])}")
 PY
 
@@ -155,6 +160,21 @@ if [[ -d data/setups ]]; then
   done < <(find data/setups -type f | sort)
 fi
 
+if [[ -d data/confluence ]]; then
+  while IFS= read -r f; do
+    base=$(basename "$f")
+    case "$base" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv)
+        add_blob "data/confluence/$base" "$f"
+        ;;
+      *)
+        echo "Fichero de confluencia no permitido: $f" >&2
+        exit 1
+        ;;
+    esac
+  done < <(find data/confluence -type f | sort)
+fi
+
 cat > "$LEEME" <<'EOF'
 Esta rama la reescribe sola GitHub Actions (workflow "Detector de explosiones").
 No edites estos ficheros: el siguiente ciclo los sustituye.
@@ -168,9 +188,9 @@ No edites estos ficheros: el siguiente ciclo los sustituye.
 - data/scans/AAAA-MM-DD.csv
   Un candidato por fila. Solo se conservan los últimos 14 días.
 - data/shadow/AAAA-MM-DD.csv
-  Señales tempranas calculadas y no enviadas. Sirven para el repaso del 24 nov.
-- data/setups/AAAA-MM-DD.csv
-  Preparaciones (ruptura, retroceso, retest). En sombra no llaman al webhook.
+  Señales tempranas antiguas, si quedara alguna. Ya no se escriben.
+- data/confluence/AAAA-MM-DD.csv
+  Avisos confluence_1h (enviados, en silencio, sin delta, tope). Recuento hasta el 24 nov.
 
 No hay secretos aquí. La URL del webhook no se guarda en el repositorio.
 EOF
@@ -182,6 +202,7 @@ while IFS= read -r f; do
     data/scans/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
     data/shadow/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
     data/setups/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
+    data/confluence/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
     *)
       echo "Ruta inesperada en el estado: $f" >&2
       exit 1

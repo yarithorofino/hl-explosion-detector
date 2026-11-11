@@ -12,6 +12,18 @@ MAX_RUNTIME=3600
 ITERATIONS=$(python3 scan_schedule.py iterations)
 echo "Pasadas previstas: ${ITERATIONS} (la prueba del webhook es una sola)."
 
+# Aggressor tape. Coverage starts on the subscription ack. A dead tape
+# only leaves confluence rows at sin_delta; the scan still runs.
+python3 trade_tape.py &
+TAPE_PID=$!
+cleanup_tape() {
+  if [[ -n "${TAPE_PID:-}" ]]; then
+    kill "$TAPE_PID" 2>/dev/null || true
+    wait "$TAPE_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup_tape EXIT
+
 any_ok=0
 last_rc=0
 

@@ -8,5 +8,8 @@ data/*.tmp
 data/state_ready
 data/run_summary.txt
 data/scans/
+data/confluence/
+data/delta_tape.json
+data/*.json.tmp
 signals/*.tmp
 signals/explosion_alerts.jsonl
