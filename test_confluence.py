@@ -62,8 +62,16 @@ class RuleTests(unittest.TestCase):
         flat = dict(delta, buy=1, sell=1, delta=0)
         self.assertEqual(confluence.score_bar(prior, bar, close, asset("BTC", mark=close, day=6e6), flat, self.cfg)["status"], "sin_presion")
         missing = {"ok": False, "reason": "sin cinta", "coverage": 0, "buy": 0, "sell": 0, "delta": 0, "max_gap_ms": 0}
-        blocked = confluence.score_bar(prior, bar, close, asset("BTC", mark=close, day=6e6), missing, self.cfg)
-        self.assertEqual(blocked["status"], "sin_delta")
+        stood_in = confluence.score_bar(prior, bar, close, asset("BTC", mark=close, day=6e6), missing, self.cfg)
+        self.assertEqual(stood_in["status"], "alerta")
+        self.assertEqual(stood_in["delta_source"], "close_location")
+        self.assertIsNone(stood_in["delta"])
+        self.assertGreater(stood_in["close_location"], 0)
+        # Still a breakout, but the close sits in the lower half of the bar.
+        weak = dict(bar, h=close + 3.0, l=close - 0.5, c=close - 0.4)
+        rejected = confluence.score_bar(prior, weak, weak["c"], asset("BTC", mark=weak["c"], day=6e6), missing, self.cfg)
+        self.assertEqual(rejected["status"], "sin_presion")
+        self.assertEqual(rejected["delta_source"], "close_location")
 
     def test_extension_above_two_atr_does_not_alert(self):
         prior, _bar, _close, delta = self._long()
@@ -268,10 +276,13 @@ class CycleTests(unittest.TestCase):
         import csv
         close = self._books_for("BTC")
         self.assertTrue(self.cycle([asset("BTC", mark=close, pct_24h=0.2, day=6_000_000)]))
-        self.assertEqual(self.calls, [])
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(self.calls[0][0]["delta_source"], "close_location")
+        self.assertIsNone(self.calls[0][0]["delta"])
+        self.calls.clear()
         path = detector.STATE.parent / "confluence" / "2026-06-15.csv"
         with path.open(encoding="utf-8") as fh:
-            self.assertEqual(list(csv.DictReader(fh))[0]["status"], "sin_delta")
+            self.assertEqual(list(csv.DictReader(fh))[0]["delta_source"], "close_location")
 
         start, end = (NOW - 2 * 3600) * 1000, (NOW + 60) * 1000
         delta = _book("BTC", start, end)

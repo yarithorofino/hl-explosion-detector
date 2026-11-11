@@ -1299,6 +1299,7 @@ def write_confluence(when, day, rows, keep_days):
         "vol_mult", "delta", "delta_coverage", "buy_ntl", "sell_ntl", "mark", "day_ntl",
         "oi_usd", "funding_pct", "premium_pct", "atr", "extension_atr", "entry", "sl",
         "sl_kind", "tp1", "tp2", "rr", "rr_tp2", "tp_kind", "note",
+        "delta_source", "close_location",
     ]
     import io
     sio = io.StringIO()
@@ -1359,6 +1360,8 @@ def _conf_csv_row(when, asset, status, scored):
         "rr_tp2": _conf_cell(scored.get("rr_tp2"), 2),
         "tp_kind": scored.get("tp_kind") or "",
         "note": scored.get("delta_reason") or "",
+        "delta_source": scored.get("delta_source") or "",
+        "close_location": _conf_cell(scored.get("close_location"), 3),
     }
 
 

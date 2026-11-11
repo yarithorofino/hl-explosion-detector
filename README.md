@@ -20,7 +20,7 @@ Hace falta las tres cosas, en largo:
 
 El corto es el espejo (cierre por debajo de la EMA20, EMA20 por debajo de la EMA50, cierre por debajo del mínimo de 20, el mismo volumen y más venta agresiva que compra) y, además, el funding tiene que estar **por encima de −0,01%/h**. Si el funding no viene o es igual o más negativo, el corto no sale. El largo no mira el funding.
 
-El delta no viene en las velas. `recentTrades` solo devuelve los últimos intercambios de unos segundos, así que no se usa como si fuera la hora. Cada ejecución escucha la cinta pública (`trades` por websocket; el lado B es compra agresiva y el lado A es venta). La cobertura de una moneda **empieza cuando el servidor confirma la suscripción**, no cuando se envía: si no hay confirmación, esa hora no cuenta como vista. Para avisar hace falta haber visto al menos el **95%** de la hora, con un hueco de como mucho **3 minutos** (el arranque de Actions entre un trabajo y el siguiente). Si no llega, la fila dice `sin_delta` y **no hay POST**.
+El delta no viene en las velas. `recentTrades` solo devuelve los últimos intercambios de unos segundos, así que no se usa como si fuera la hora. Cada ejecución escucha la cinta pública (`trades` por websocket; el lado B es compra agresiva y el lado A es venta). La cobertura de una moneda **empieza cuando el servidor confirma la suscripción**, no cuando se envía: si no hay confirmación, esa hora no cuenta como vista. Si la cinta ha visto al menos el **95%** de la hora, con un hueco de como mucho **3 minutos**, el delta es el de esa cinta (`delta_source: "tape"`). En GitHub el trabajo dura una hora y luego se apaga, y el siguiente a menudo arranca minutos después: esa hora no llega al 95%. Entonces no se inventa un delta en dólares. La presión se mira en el cierre de la propia hora (el close location de Williams: +1 es el máximo, −1 el mínimo). Un largo pide un cierre en la mitad alta, un corto en la mitad baja. El aviso lo dice con `delta_source: "close_location"` y `delta` a null. Un cierre justo en el medio, o una vela sin rango, no pasa.
 
 Tampoco se avisa si el precio de ahora ya está a más de **2 ATR** de 1 hora más allá del nivel de ruptura. Dos es el mismo múltiplo que el stop mínimo: más lejos que eso, la entrada llega tarde. Como un aviso válido está como mucho a 2 ATR del nivel, el stop de 2 ATR queda en el nivel o por debajo. Si el último giro queda más lejos, el stop se abre hasta ese giro.
 
@@ -101,6 +101,8 @@ Un aviso de verdad es una lista. Si en el mismo cuarto de hora saltan varias mon
     "donchian": 99150.0,
     "vol_mult": 1.8,
     "delta": 12500000.0,
+    "delta_source": "tape",
+    "close_location": 0.64,
     "buy_ntl": 48000000.0,
     "sell_ntl": 35500000.0,
     "delta_coverage": 0.98,
