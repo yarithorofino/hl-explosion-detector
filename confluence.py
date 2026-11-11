@@ -548,6 +548,28 @@ def _sig(value):
     return float(f"{number:.8g}")
 
 
+def _close_location(bar):
+    """Williams/Arms close location. +1 is the high, -1 is the low.
+
+    None when the bar has no range, so a doji is not called pressure.
+    """
+    high, low, close = _f(bar.get("h")), _f(bar.get("l")), _f(bar.get("c"))
+    if high is None or low is None or close is None:
+        return None
+    span = high - low
+    if span <= 0:
+        return None
+    return (2 * close - high - low) / span
+
+
+def _location_agrees(side, location):
+    if location is None or side not in ("long", "short"):
+        return False
+    if side == "long":
+        return location > 0
+    return location < 0
+
+
 def _delta_fields(delta):
     if not delta:
         return {"delta": None, "buy_ntl": None, "sell_ntl": None, "delta_coverage": None}
@@ -562,8 +584,11 @@ def _delta_fields(delta):
 def score_bar(prior, bar, entry, asset, delta, cfg, require_delta=True):
     """Score one completed hour against the closed hours before it.
 
-    `require_delta` is false only for the historical replay. Live always
-    leaves it true: a missing tape does not pass.
+    `require_delta` is false only for the historical replay. Live leaves it
+    true. A full hour of tape is used when the socket covered it. The Actions
+    job exits every hour, so that coverage is often missing: the pressure
+    test then uses the bar's close location and says so. A missing tape is
+    not treated as a dollar delta of zero.
     """
     slow = int(cfg["confluence_ema_slow"])
     fast_n = int(cfg["confluence_ema_fast"])
@@ -605,22 +630,41 @@ def score_bar(prior, bar, entry, asset, delta, cfg, require_delta=True):
         "sl": sl, "sl_kind": sl_kind, "tp1": tp1, "tp2": tp2, "rr": rr1,
         "rr_tp2": rr2, "tp_kind": tp_kind, "close": close,
     }
+    base["close_location"] = _close_location(bar)
     if extension > float(cfg["confluence_extension_atr"]):
         return {"status": "extendido", **base}
     if require_delta:
-        if not delta or not delta.get("ok"):
+        tape_ok = bool(delta and delta.get("ok"))
+        buy = sell = None
+        if tape_ok:
+            buy, sell = _f(delta.get("buy")), _f(delta.get("sell"))
+            tape_ok = buy is not None and sell is not None
+        if tape_ok:
+            pressure = buy > sell if side == "long" else sell > buy
+            base.update(_delta_fields(delta))
+            base["delta_source"] = "tape"
+            if not pressure:
+                base["delta_reason"] = "cinta en contra"
+                return {"status": "sin_presion", **base}
+        else:
+            # The hour was not on the tape. Do not invent a dollar delta from
+            # the fragment that was seen. The close location is the stand-in,
+            # and the payload names it.
             reason = (delta or {}).get("reason") or "sin cinta"
-            return {"status": "sin_delta", "delta_reason": reason, **base, **_delta_fields(delta)}
-        buy, sell = _f(delta.get("buy")), _f(delta.get("sell"))
-        if buy is None or sell is None:
-            return {"status": "sin_delta", "delta_reason": "sin cinta", **base}
-        pressure = buy > sell if side == "long" else sell > buy
-        fields = _delta_fields(delta)
-        if not pressure:
-            return {"status": "sin_presion", **base, **fields}
-        base.update(fields)
+            fields = _delta_fields(delta)
+            fields["delta"] = None
+            fields["buy_ntl"] = None
+            fields["sell_ntl"] = None
+            base.update(fields)
+            base["delta_source"] = "close_location"
+            if not _location_agrees(side, base["close_location"]):
+                base["delta_reason"] = reason if base["close_location"] is None else "cierre en la mitad contraria"
+                status = "sin_delta" if base["close_location"] is None else "sin_presion"
+                return {"status": status, **base}
+            base["delta_reason"] = reason
     else:
         base.update(_delta_fields(delta))
+        base["delta_source"] = None
     if side == "short" and not funding_allows_short(asset, cfg):
         return {"status": "veto_funding", **base}
     if sl is None or tp1 is None or rr1 is None:
@@ -662,6 +706,8 @@ def public_payload(scored, asset, now_label):
         "donchian": _sig(scored.get("donchian")),
         "vol_mult": None if scored.get("vol_mult") is None else round(scored["vol_mult"], 2),
         "delta": _sig(scored.get("delta")),
+        "delta_source": scored.get("delta_source"),
+        "close_location": None if scored.get("close_location") is None else round(scored["close_location"], 3),
         "buy_ntl": _sig(scored.get("buy_ntl")),
         "sell_ntl": _sig(scored.get("sell_ntl")),
         "delta_coverage": None if scored.get("delta_coverage") is None else round(scored["delta_coverage"], 3),
