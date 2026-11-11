@@ -110,6 +110,55 @@ class SetupTests(unittest.TestCase):
         self.assertAlmostEqual(flat_r, -(0.00045 * 2 * 100) / 10)
         self.assertAlmostEqual(flat_pct, -0.09)
 
+    def test_btc_regime_blocks_the_other_side(self):
+        cs = [_bar(i, 1.0 + i * 0.01, vol=10) for i in range(70)]
+        end = 69
+        prior_high = max(cs[i]["h"] for i in range(end - 20, end))
+        cs[end] = _bar(end, prior_high + 0.4, high=prior_high + 0.4, low=cs[end]["l"], vol=40)
+        asset = _asset("GRAM")
+        self.assertIsNotNone(setups.trend_breakout(cs, end, asset, self.cfg, bias="long"))
+        self.assertIsNone(setups.trend_breakout(cs, end, asset, self.cfg, bias="short"))
+        _got, reason = setups.inspect_breakout(cs, end, asset, self.cfg, bias="short")
+        self.assertEqual(reason, "regime")
+        _got, reason = setups.inspect_breakout(cs, end, asset, self.cfg, bias="unknown")
+        self.assertEqual(reason, "regime_unknown")
+        # bias omitted keeps the older tests: the filter is off.
+        self.assertIsNotNone(setups.trend_breakout(cs, end, asset, self.cfg))
+
+    def test_four_hour_donchian_is_its_own_type(self):
+        cs = []
+        for i in range(80):
+            px = 10 + i * 0.2
+            cs.append({
+                "t": i * 4 * 3_600_000, "o": px, "h": px, "l": px - 0.3, "c": px, "v": 10,
+            })
+        end = 79
+        prior = max(cs[i]["h"] for i in range(end - 20, end))
+        px = prior + 1
+        cs[end] = {
+            "t": end * 4 * 3_600_000, "o": px, "h": px, "l": px - 0.3, "c": px, "v": 40,
+        }
+        got, reason = setups.inspect_breakout(cs, end, _asset(), self.cfg, kind="trend_breakout_4h")
+        self.assertEqual(reason, "taken")
+        self.assertEqual(got["setup"], "trend_breakout_4h")
+        self.assertEqual(got["managed"], "chandelier")
+        self.assertAlmostEqual(got["tp1"], got["entry"] + 2 * (got["entry"] - got["initial_sl"]))
+
+    def test_btc_bias_follows_the_4h_ema200(self):
+        up = []
+        for i in range(210):
+            px = 100 + i
+            up.append({"t": i * 4 * 3_600_000, "o": px, "h": px, "l": px, "c": px, "v": 1})
+        close_ms = up[-1]["t"] + 4 * 3_600_000
+        self.assertEqual(setups.btc_bias(up, close_ms), "long")
+        down = []
+        for i in range(210):
+            px = 500 - i
+            down.append({"t": i * 4 * 3_600_000, "o": px, "h": px, "l": px, "c": px, "v": 1})
+        close_ms = down[-1]["t"] + 4 * 3_600_000
+        self.assertEqual(setups.btc_bias(down, close_ms), "short")
+        self.assertIsNone(setups.btc_bias(up[:50], close_ms))
+
 
 if __name__ == "__main__":
     unittest.main()

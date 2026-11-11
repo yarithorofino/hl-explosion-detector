@@ -276,15 +276,26 @@ def completed_four_hour(cs, end):
     return full
 
 
+def _four_hour_input(cs):
+    if len(cs) < 3:
+        return False
+    gaps = sorted((cs[i + 1].get("t") or 0) - (cs[i].get("t") or 0) for i in range(len(cs) - 1))
+    return gaps[len(gaps) // 2] >= 3 * 3_600_000
+
+
 def major_level_within_1r(cs, end, side, price, risk):
     """24h or 7d extreme of completed 4h candles, in front of the trade and closer than 1R.
 
     Returns (blocked, detail). A breakout that has already cleared that extreme is not blocked.
+    When `cs` is already 4h, the signal bar itself is left out of the extreme.
     """
     price, risk = _f(price), _f(risk)
     if price is None or risk is None or risk <= 0 or side not in ("long", "short"):
         return False, None
-    bars = completed_four_hour(cs, end)
+    if _four_hour_input(cs):
+        bars = [{"h": _f(c.get("h")), "l": _f(c.get("l"))} for c in cs[:end]]
+    else:
+        bars = completed_four_hour(cs, end)
     if not bars:
         return False, None
     kind = "h" if side == "long" else "l"
@@ -331,7 +342,18 @@ def _payload(cs, end, side, kind, asset, cfg, price, sl, atr, tp1, tp2, rr, mana
     }
 
 
-def _build(cs, end, side, kind, asset, cfg):
+def _regime_reason(side, bias):
+    """None means the filter is off. Anything else means BTC's 4h EMA200 is not on this side."""
+    if bias is None:
+        return None
+    if bias not in ("long", "short"):
+        return "regime_unknown"
+    if bias != side:
+        return "regime"
+    return None
+
+
+def _build(cs, end, side, kind, asset, cfg, bias=None):
     price = _f(cs[end].get("c"))
     atrs = wilder_atr(cs[:end + 1], int(cfg["atr_period"]))
     if price is None or not atrs or atrs[end] is None:
@@ -344,7 +366,10 @@ def _build(cs, end, side, kind, asset, cfg):
     risk = abs(price - sl)
     if risk <= 0:
         return None, "atr"
-    if kind in ("trend_breakout", "trend_pullback"):
+    if kind in ("trend_breakout", "trend_pullback", "trend_breakout_4h"):
+        regime = _regime_reason(side, bias)
+        if regime:
+            return None, regime
         blocked, _detail = major_level_within_1r(cs, end, side, price, risk)
         if blocked:
             return None, "major_level"
@@ -362,12 +387,12 @@ def _build(cs, end, side, kind, asset, cfg):
     return _payload(cs, end, side, kind, asset, cfg, price, sl, atrs[end], tp1, tp2, rr, "structural"), None
 
 
-def trend_breakout(cs, end, asset, cfg):
-    got, _reason = inspect_breakout(cs, end, asset, cfg)
+def trend_breakout(cs, end, asset, cfg, bias=None):
+    got, _reason = inspect_breakout(cs, end, asset, cfg, bias=bias)
     return got
 
 
-def inspect_breakout(cs, end, asset, cfg):
+def inspect_breakout(cs, end, asset, cfg, bias=None, kind="trend_breakout"):
     """Return (signal or None, filter). `quiet` means the bar is not a channel break."""
     period = int(cfg["setup_donchian"])
     fast_n, slow_n = int(cfg["setup_ema_fast"]), int(cfg["setup_ema_slow"])
@@ -394,13 +419,13 @@ def inspect_breakout(cs, end, asset, cfg):
         return None, "volume"
     if not _passes_book(asset, side, cfg):
         return None, "book_5m" if side == "short" else "book_1m"
-    got, reason = _build(cs, end, side, "trend_breakout", asset, cfg)
+    got, reason = _build(cs, end, side, kind, asset, cfg, bias=bias)
     if got:
         return got, "taken"
     return None, reason or "atr"
 
 
-def trend_pullback(cs, end, asset, cfg):
+def trend_pullback(cs, end, asset, cfg, bias=None):
     fast_n, slow_n = int(cfg["setup_ema_fast"]), int(cfg["setup_ema_slow"])
     cl = closes(cs[:end + 1])
     if cl is None or end < slow_n:
@@ -425,7 +450,7 @@ def trend_pullback(cs, end, asset, cfg):
             return None
         if not _passes_book(asset, "long", cfg):
             return None
-        got, _reason = _build(cs, end, "long", "trend_pullback", asset, cfg)
+        got, _reason = _build(cs, end, "long", "trend_pullback", asset, cfg, bias=bias)
         return got
     if fast[end] < slow[end]:
         highs = _swing_indexes(vals_hi, wing, "high")
@@ -433,7 +458,7 @@ def trend_pullback(cs, end, asset, cfg):
             return None
         if not _passes_book(asset, "short", cfg):
             return None
-        got, _reason = _build(cs, end, "short", "trend_pullback", asset, cfg)
+        got, _reason = _build(cs, end, "short", "trend_pullback", asset, cfg, bias=bias)
         return got
     return None
 
@@ -464,13 +489,17 @@ def support_retest(cs, end, asset, cfg):
     return got
 
 
-def evaluate(cs, end, asset, cfg):
-    """One closed bar. Breakout wins over a pullback, which wins over a retest."""
-    for fn in (trend_breakout, trend_pullback, support_retest):
-        got = fn(cs, end, asset, cfg)
+def evaluate(cs, end, asset, cfg, bias=None, cs_4h=None, end_4h=None):
+    """One closed bar. 1h breakout, then pullback, then the 4h breakout, then the retest."""
+    for fn in (trend_breakout, trend_pullback):
+        got = fn(cs, end, asset, cfg, bias=bias)
         if got:
             return got
-    return None
+    if cs_4h is not None and end_4h is not None:
+        got, _reason = inspect_breakout(cs_4h, end_4h, asset, cfg, bias=bias, kind="trend_breakout_4h")
+        if got:
+            return got
+    return support_retest(cs, end, asset, cfg)
 
 
 def net_trade(entry, exit_price, risk, side, fee_pct_per_side=FEE_PCT_PER_SIDE):
@@ -546,4 +575,47 @@ def net_managed(entry, exit_price, risk, side, partial=None, fee_pct_per_side=FE
         gross_pct = 0.5 * ((partial / entry - 1) * 100 * sign) + 0.5 * ((exit_price / entry - 1) * 100 * sign)
     fee_pct = 2 * float(fee_pct_per_side)
     fee_r = (fee_pct / 100.0) * entry / risk
-    return gross_r - fee_r, gross_pct - fee_pct
+    return gross_r - fee_r, gross_pct - fee_pct, fee_r, gross_r
+
+
+def btc_bias(btc_4h, t_ms):
+    """Long when the last closed BTC 4h close is above its EMA200, short when below.
+
+    That is the higher-timeframe trend filter. Daily EMA50 is the other usual
+    version of the same rule. This study uses the 4h EMA200 only. The choice
+    was made before reading the November window, and it is not swapped afterwards.
+    """
+    if not btc_4h or t_ms is None:
+        return None
+    closed = [c for c in btc_4h if (c.get("t") or 0) + 4 * 3_600_000 <= t_ms + 1_000]
+    if len(closed) < 200:
+        return None
+    cl = closes(closed)
+    ema = ema_series(cl, 200) if cl else None
+    if not ema or ema[-1] is None or cl[-1] is None:
+        return None
+    if cl[-1] > ema[-1]:
+        return "long"
+    if cl[-1] < ema[-1]:
+        return "short"
+    return None
+
+
+def to_4h(cs):
+    """Complete 4-hour bars from hourly candles. A short last bucket is dropped."""
+    buckets = {}
+    for c in cs:
+        t = c.get("t") or 0
+        key = (t // (4 * 3_600_000)) * 4 * 3_600_000
+        row = buckets.setdefault(key, {"t": key, "o": None, "h": None, "l": None, "c": None, "v": 0.0, "n": 0})
+        o, h, l, cl, v = _f(c.get("o")), _f(c.get("h")), _f(c.get("l")), _f(c.get("c")), _f(c.get("v"))
+        if None in (o, h, l, cl):
+            continue
+        if row["o"] is None:
+            row["o"] = o
+        row["h"] = h if row["h"] is None else max(row["h"], h)
+        row["l"] = l if row["l"] is None else min(row["l"], l)
+        row["c"] = cl
+        row["v"] += 0.0 if v is None else v
+        row["n"] += 1
+    return [buckets[k] for k in sorted(buckets) if buckets[k]["n"] >= 4]

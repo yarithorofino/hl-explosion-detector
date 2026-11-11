@@ -1639,6 +1639,12 @@ def run_cycle(cfg):
         cool = float(cfg["cooldown_hours"]) * H
         cap = int(cfg["setup_max_per_day"])
         room = cap - st["setup_wakes"].get(today, 0)
+        btc_4h = None
+        try:
+            btc_4h = candles("BTC", "4h", 220)
+            n_series += 1
+        except Exception as exc:
+            log(f"setup BTC 4h: {exc}")
         queued = []
         for asset in assets:
             if (asset.get("dayNtlVlm") or 0) < cfg["tradable_min_day_ntl_usd"]:
@@ -1652,7 +1658,13 @@ def run_cycle(cfg):
             cs = hourly.get(coin)
             if not cs:
                 try:
-                    cs = candles(coin, "1h", int(cfg["setup_ema_slow"]) + int(cfg["setup_donchian"]) + 10)
+                    cs = candles(
+                        coin, "1h",
+                        max(
+                            int(cfg["setup_ema_slow"]) + int(cfg["setup_donchian"]) + 10,
+                            4 * (int(cfg["setup_ema_slow"]) + int(cfg["setup_donchian"]) + 5),
+                        ),
+                    )
                     hourly[coin] = cs
                     n_series += 1
                 except Exception as exc:
@@ -1661,7 +1673,18 @@ def run_cycle(cfg):
             if len(cs) < int(cfg["setup_ema_slow"]) + 2:
                 continue
             end = len(cs) - 2 if len(cs) >= 2 else len(cs) - 1
-            got = setup_scanner.evaluate(cs, end, asset, cfg)
+            closed_ms = (cs[end].get("t") or 0) + H * 1000
+            bias = setup_scanner.btc_bias(btc_4h, closed_ms)
+            if bias is None:
+                bias = "unknown"
+            cs4 = setup_scanner.to_4h(cs)
+            end4 = None
+            for j, bar in enumerate(cs4):
+                if bar["t"] + 4 * H * 1000 <= closed_ms + 1_000:
+                    end4 = j
+            if end4 is not None and closed_ms - (cs4[end4]["t"] + 4 * H * 1000) > 4 * H * 1000:
+                end4 = None
+            got = setup_scanner.evaluate(cs, end, asset, cfg, bias=bias, cs_4h=cs4, end_4h=end4)
             if not got:
                 continue
             mark = asset.get("mark")
