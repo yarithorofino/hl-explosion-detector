@@ -1268,6 +1268,7 @@ def _entry_payload(watch, nowm):
 _CONF_NOTE_SEC = {
     "quiet": 4 * H,
     "tope": 4 * H,
+    "shadow_long": 4 * H,
     "extendido": 30 * 60,
     "sin_delta": 30 * 60,
     "sin_presion": 30 * 60,
@@ -1401,7 +1402,11 @@ def _confluence_markdown(rows, universe_n, status):
 
 
 def run_confluence(cfg, st, assets, hourly, fifteens, now, nowm, quiet):
-    """Scan every liquid perp. POST only a full confluence_1h. Returns a summary."""
+    """Scan every liquid perp. POST only a short confluence_1h.
+
+    A long that passes the same three tests is written as shadow_long. It is
+    not sent and it does not spend a wake or the coin cooldown.
+    """
     tape = confluence.read_tape_file(STATE.parent / "delta_tape.json")
     st["delta"] = confluence.merge_tape(st.get("delta"), tape, now * 1000)
     st.setdefault("confluence_fire", {})
@@ -1455,6 +1460,9 @@ def run_confluence(cfg, st, assets, hourly, fifteens, now, nowm, quiet):
         if status == "alerta":
             seen = st["confluence_fire"].get(coin)
             if seen is not None and now - seen < cool:
+                continue
+            if scored.get("side") == "long":
+                _keep(asset, "shadow_long", scored)
                 continue
             if quiet:
                 if _keep(asset, "quiet", scored):

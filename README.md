@@ -4,7 +4,7 @@ Este programa mira los perpetuos de Hyperliquid (el mercado principal y los de H
 
 GitHub lo ejecuta cada 15 minutos. El horario y las pasadas de cada arranque no han cambiado.
 
-Lo único que llama al webhook, y por tanto despierta el análisis de pago, es `confluence_1h`.
+Lo único que llama al webhook, y por tanto despierta el análisis de pago, es un **corto** `confluence_1h`. Un largo que cumple las tres cosas se anota y no se envía.
 
 ## Qué se mira
 
@@ -18,19 +18,19 @@ Hace falta las tres cosas, en largo:
 2. **Ruptura.** Ese cierre está por encima del máximo de las 20 velas de 1h cerradas anteriores (canal de Donchian).
 3. **Volumen con presión agresiva.** El nocional de esa hora es al menos **1,5 veces** la media de esas 20 horas, y en esa hora el agresor compró más de lo que vendió (delta: compras menos ventas).
 
-El corto es el espejo (cierre por debajo de la EMA20, EMA20 por debajo de la EMA50, cierre por debajo del mínimo de 20, el mismo volumen y más venta agresiva que compra) y, además, el funding tiene que estar **por encima de −0,01%/h**. Si el funding no viene o es igual o más negativo, el corto no sale. El largo no mira el funding.
+El corto es el espejo (cierre por debajo de la EMA20, EMA20 por debajo de la EMA50, cierre por debajo del mínimo de 20, el mismo volumen y más venta agresiva que compra) y, además, el funding tiene que estar **por encima de −0,01%/h**. Si el funding no viene o es igual o más negativo, el corto no sale. El largo no mira el funding. El largo se escribe en el CSV con estado `shadow_long` y **no se envía**: no gasta uno de los 8 despertares ni abre la pausa de 4 horas de esa moneda. La misma fila no se repite hasta pasadas 4 horas.
 
 El delta no viene en las velas. `recentTrades` solo devuelve los últimos intercambios de unos segundos, así que no se usa como si fuera la hora. Cada ejecución escucha la cinta pública (`trades` por websocket; el lado B es compra agresiva y el lado A es venta). La cobertura de una moneda **empieza cuando el servidor confirma la suscripción**, no cuando se envía: si no hay confirmación, esa hora no cuenta como vista. Si la cinta ha visto al menos el **95%** de la hora, con un hueco de como mucho **3 minutos**, el delta es el de esa cinta (`delta_source: "tape"`). En GitHub el trabajo dura una hora y luego se apaga, y el siguiente a menudo arranca minutos después: esa hora no llega al 95%. Entonces no se inventa un delta en dólares. La presión se mira en el cierre de la propia hora (el close location de Williams: +1 es el máximo, −1 el mínimo). Un largo pide un cierre en la mitad alta, un corto en la mitad baja. El aviso lo dice con `delta_source: "close_location"` y `delta` a null. Un cierre justo en el medio, o una vela sin rango, no pasa.
 
 Tampoco se avisa si el precio de ahora ya está a más de **2 ATR** de 1 hora más allá del nivel de ruptura. Dos es el mismo múltiplo que el stop mínimo: más lejos que eso, la entrada llega tarde. Como un aviso válido está como mucho a 2 ATR del nivel, el stop de 2 ATR queda en el nivel o por debajo. Si el último giro queda más lejos, el stop se abre hasta ese giro.
 
-Cada moneda espera **4 horas** después de un aviso. Hay como máximo **8 despertares al día**: cada POST es un despertar, aunque lleve varias monedas. De **00:00 a 08:00** (Madrid) no hay POST. Se anota `quiet` y, si a las 8 la hora sigue siendo válida, puede salir entonces. La pausa de 4 horas no se gasta de noche.
+Cada moneda espera **4 horas** después de un POST. Hay como máximo **8 despertares al día**: cada POST es un despertar, aunque lleve varias monedas. Un largo no cuenta. De **00:00 a 08:00** (Madrid) no hay POST. Un corto se anota `quiet` y, si a las 8 la hora sigue siendo válida, puede salir entonces. La pausa de 4 horas no se gasta de noche ni con un largo.
 
-El aviso lleva la moneda, el dex, el lado, las tres confluencias (EMA20, EMA50, nivel Donchian, múltiplo de volumen y delta), la marca, el volumen de 24 horas, el interés abierto, el funding, la prima, el ATR, una entrada (la marca de ahora), el stop, y TP1/TP2. Si hay un máximo o un mínimo estructural por delante, el objetivo es ese y el R:R se calcula desde la marca. Si no lo hay, TP1 está a 2R y TP2 a 3R del stop (`tp_kind`: `estructural`, `mixto` o `medido`).
+El aviso lleva la moneda, el dex, el lado (`short`), las tres confluencias (EMA20, EMA50, nivel Donchian, múltiplo de volumen y delta), la marca, el volumen de 24 horas, el interés abierto, el funding, la prima, el ATR, una entrada (la marca de ahora) y el stop. El stop no ha cambiado: como mínimo 2 ATR, y más lejos si el nivel de ruptura o el último giro quedan más allá. El objetivo que manda es **TP1 a 2R**: dos veces la distancia de la entrada al stop, hacia el lado del corto. TP2 queda a 3R. En el webhook y en el CSV, `tp1` es ese 2R, `rr` es 2, `tp2` es el 3R, `rr_tp2` es 3 y `tp_kind` es `2r`. El largo, que solo se anota, sigue llevando el objetivo estructural de antes (`estructural`, `mixto` o `medido`).
 
 La fase 1 antigua (el salto de 1 hora, el de 15 minutos y la escalera) puede seguir saliendo en la tabla del ciclo, pero **no llama al webhook**. Las señales tempranas (absorción, volumen relativo, compresión, interés abierto, delta de absorción y funding) están apagadas: no se calculan y no hay repaso de sombra del 24 nov. Las preparaciones (`setup_scanner`) y el aviso `entry_ready` también están apagados.
 
-El recuento hasta el 24 nov está en `data/confluence/` de la rama `detector-state`: una fila por aviso enviado, en silencio, sin delta, extendido o parado por el cupo. Se guardan 21 días.
+El recuento está en `data/confluence/` de la rama `detector-state`: una fila por corto enviado, largo anotado (`shadow_long`), silencio, sin delta, extendido o parado por el cupo. Se guardan 21 días.
 
 El estudio de velas de 1h de los últimos 14 días (sin delta, y solo en los 30 perps líquidos con más volumen, para caber en el cupo de la API) está en `reports/confluence_replay_2026-11-11.md`. El directo mira todos los que pasan el filtro, no solo esos 30.
 
@@ -94,17 +94,17 @@ Un aviso de verdad es una lista. Si en el mismo cuarto de hora saltan varias mon
     "type": "confluence_1h",
     "coin": "BTC",
     "dex": "main",
-    "side": "long",
-    "side_label": "largo",
+    "side": "short",
+    "side_label": "corto",
     "ema20": 98420.5,
     "ema50": 97110.2,
     "donchian": 99150.0,
     "vol_mult": 1.8,
-    "delta": 12500000.0,
+    "delta": -12500000.0,
     "delta_source": "tape",
-    "close_location": 0.64,
-    "buy_ntl": 48000000.0,
-    "sell_ntl": 35500000.0,
+    "close_location": -0.64,
+    "buy_ntl": 35500000.0,
+    "sell_ntl": 48000000.0,
     "delta_coverage": 0.98,
     "mark": 99540.0,
     "dayNtlVlm": 2500000000.0,
@@ -113,13 +113,13 @@ Un aviso de verdad es una lista. Si en el mismo cuarto de hora saltan varias mon
     "premium_pct": -0.0364,
     "atr": 420.0,
     "entry": 99540.0,
-    "sl": 98700.0,
+    "sl": 100380.0,
     "sl_kind": "2atr",
-    "tp1": 101220.0,
-    "tp2": 102060.0,
+    "tp1": 97860.0,
+    "tp2": 97020.0,
     "rr": 2.0,
     "rr_tp2": 3.0,
-    "tp_kind": "medido",
+    "tp_kind": "2r",
     "extension_atr": 0.93,
     "detected_at_madrid": "2026-06-15 14:15"
   }
@@ -134,9 +134,10 @@ La primera tabla es la fase 1, que ya no despierta nada. Debajo está la de la c
 
 | Estado | Qué ha pasado |
 | --- | --- |
-| `posted` | Se envió el webhook. |
-| `dry_run` | Había confluencia, pero faltan los secretos. Cuenta como despertar y deja la pausa de 4 horas. |
-| `quiet` | De noche. Anotado, sin POST. No gasta la pausa. |
+| `posted` | Se envió el webhook. Solo cortos. |
+| `dry_run` | Había un corto, pero faltan los secretos. Cuenta como despertar y deja la pausa de 4 horas. |
+| `shadow_long` | Largo con las tres confluencias. Anotado, sin POST. No gasta el cupo ni la pausa. |
+| `quiet` | Corto de noche. Anotado, sin POST. No gasta la pausa. |
 | `tope` | Ya van 8 despertares hoy. |
 | `post_failed` | El POST falló. No gasta cupo ni pausa. |
 | `sin_delta` | Precio y volumen sí, pero la cinta no cubre la hora. No se envía. |
