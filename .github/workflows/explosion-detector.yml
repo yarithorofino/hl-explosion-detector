@@ -7,9 +7,6 @@
 name: Detector de explosiones
 
 on:
-  schedule:
-    # UTC. GitHub puede retrasar o saltarse arranques.
-    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       force_test_post:
