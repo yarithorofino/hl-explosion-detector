@@ -521,6 +521,11 @@ def _targets(prior, side, entry, sl, cfg):
     sign = 1 if side == "long" else -1
     measured1 = entry + sign * 2 * risk
     measured2 = entry + sign * 3 * risk
+    # Shorts take a fixed 2R. The 60-day replay was positive on shorts at 2R
+    # in both halves and negative on every long book, so the live target is
+    # no longer the next structural level. TP2 stays at 3R for the payload.
+    if side == "short":
+        return measured1, measured2, "2r", 2.0, 3.0
     structural1, structural2 = watchmod.structural_targets(
         prior, side, entry,
         wing=int(cfg.get("swing_wing", 2)),

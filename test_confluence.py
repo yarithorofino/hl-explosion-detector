@@ -57,6 +57,8 @@ class RuleTests(unittest.TestCase):
         self.assertGreater(got["ema20"], got["ema50"])
         self.assertLessEqual(got["sl"], got["donchian"])
         self.assertGreaterEqual(close - got["sl"], 2 * got["atr"] - 1e-6)
+        self.assertIn(got["tp_kind"], ("estructural", "mixto", "medido"))
+        self.assertNotEqual(got["tp_kind"], "2r")
         thin = dict(bar, v=10)
         self.assertEqual(confluence.score_bar(prior, thin, close, asset("BTC", mark=close, day=6e6), delta, self.cfg)["status"], "no")
         flat = dict(delta, buy=1, sell=1, delta=0)
@@ -93,6 +95,13 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(got["status"], "alerta")
         self.assertEqual(got["side"], "short")
         self.assertGreaterEqual(got["sl"], got["donchian"])
+        risk = got["sl"] - close
+        self.assertGreater(risk, 0)
+        self.assertAlmostEqual(got["tp1"], close - 2 * risk)
+        self.assertAlmostEqual(got["tp2"], close - 3 * risk)
+        self.assertEqual(got["tp_kind"], "2r")
+        self.assertEqual(got["rr"], 2.0)
+        self.assertEqual(got["rr_tp2"], 3.0)
         crowded = asset("ETH", mark=close, day=8_000_000, funding=-0.0002)
         self.assertEqual(confluence.score_bar(prior, bar, close, crowded, delta, self.cfg)["status"], "veto_funding")
         blind = asset("ETH", mark=close, day=8_000_000, funding=None)
@@ -178,6 +187,20 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(frames[0][2], payload)
 
 
+def _fifteen_down(start_ms, close, vol):
+    bars = []
+    price = close + 0.6
+    for i in range(4):
+        price -= 0.2
+        bars.append({
+            "t": start_ms + i * M15, "o": price + 0.2, "h": price + 0.3,
+            "l": price - 0.1, "c": price, "v": vol,
+        })
+    bars[-1]["c"] = close
+    bars[-1]["l"] = min(bars[-1]["l"], close)
+    return bars
+
+
 def _fifteen(start_ms, close, vol):
     bars = []
     price = close - 0.6
@@ -243,6 +266,17 @@ class CycleTests(unittest.TestCase):
         ]
         return close
 
+    def _books_short(self, coin, shift=0.8, vol=40.0):
+        now_ms = NOW * 1000
+        hours = _series(70, -0.3, 120.0, now_ms - 69 * H)
+        level = min(c["l"] for c in hours if c["t"] + H <= now_ms - H)
+        close = level - shift
+        self.books[(coin, "1h")] = hours
+        self.books[(coin, "15m")] = _fifteen_down(now_ms - H, close, vol) + [
+            {"t": now_ms, "o": close, "h": close, "l": close, "c": close, "v": 1},
+        ]
+        return close
+
     def cycle(self, assets, state=None):
         detector.scan = lambda: snap(assets)
         if state is not None:
@@ -250,31 +284,71 @@ class CycleTests(unittest.TestCase):
         return detector.run_cycle(load_cfg())
 
     def test_posts_a_batch_as_one_wake(self):
-        btc = self._books_for("BTC")
-        eth = self._books_for("ETH")
+        btc = self._books_short("BTC")
+        eth = self._books_short("ETH")
         start, end = (NOW - 2 * 3600) * 1000, (NOW + 60) * 1000
         delta = {"cov": {}, "flow": {}}
         for coin in ("BTC", "ETH"):
-            part = _book(coin, start, end)
+            part = _book(coin, start, end, buy=100.0, sell=5_000.0)
             delta["cov"].update(part["cov"])
             delta["flow"].update(part["flow"])
         self.assertTrue(self.cycle([
-            asset("BTC", mark=btc, pct_24h=0.4, day=6_000_000),
-            asset("ETH", mark=eth, pct_24h=0.4, day=7_000_000),
-            asset("xyz:THIN", dex="xyz", mark=eth, pct_24h=0.4, day=6_000_000, oi=100_000),
+            asset("BTC", mark=btc, pct_24h=-0.4, day=6_000_000),
+            asset("ETH", mark=eth, pct_24h=-0.4, day=7_000_000),
+            asset("xyz:THIN", dex="xyz", mark=eth, pct_24h=-0.4, day=6_000_000, oi=100_000),
         ], state={"marks": [], "last_fire": {}, "wakes": {}, "delta": delta}))
         self.assertEqual(len(self.calls), 1)
         self.assertEqual({item["coin"] for item in self.calls[0]}, {"BTC", "ETH"})
         item = self.calls[0][0]
         self.assertEqual(item["type"], "confluence_1h")
+        self.assertEqual(item["side"], "short")
         for key in ("ema20", "ema50", "donchian", "vol_mult", "delta", "mark", "dayNtlVlm",
                     "oi_usd", "funding_pct", "premium_pct", "atr", "entry", "sl", "tp1", "tp2", "rr"):
             self.assertIsNotNone(item[key])
+        risk = item["sl"] - item["entry"]
+        self.assertAlmostEqual(item["tp1"], item["entry"] - 2 * risk)
+        self.assertAlmostEqual(item["tp2"], item["entry"] - 3 * risk)
+        self.assertEqual(item["rr"], 2.0)
+        self.assertEqual(item["rr_tp2"], 3.0)
+        self.assertEqual(item["tp_kind"], "2r")
         self.assertEqual(json.loads(detector.STATE.read_text())["confluence_wakes"]["2026-06-15"], 1)
+
+    def test_long_is_logged_and_does_not_wake_or_block_a_short(self):
+        import csv
+        close = self._books_for("BTC")
+        short = self._books_short("ETH")
+        self.assertTrue(self.cycle([
+            asset("BTC", mark=close, pct_24h=0.4, day=6_000_000),
+            asset("ETH", mark=short, pct_24h=-0.4, day=7_000_000),
+        ]))
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual([item["coin"] for item in self.calls[0]], ["ETH"])
+        self.assertEqual(self.calls[0][0]["side"], "short")
+        path = detector.STATE.parent / "confluence" / "2026-06-15.csv"
+        with path.open(encoding="utf-8") as fh:
+            rows = list(csv.DictReader(fh))
+        longs = [row for row in rows if row["coin"] == "BTC"]
+        self.assertEqual([row["status"] for row in longs], ["shadow_long"])
+        st = json.loads(detector.STATE.read_text())
+        self.assertEqual(st["confluence_wakes"]["2026-06-15"], 1)
+        self.assertNotIn("BTC", st["confluence_fire"])
+        self.assertIn("ETH", st["confluence_fire"])
+
+        self.calls.clear()
+        path.unlink()
+        detector.send = lambda payload, cfg: (_ for _ in ()).throw(AssertionError("el largo no se envía"))
+        self.assertTrue(self.cycle([
+            asset("BTC", mark=close, pct_24h=0.4, day=6_000_000),
+        ], state={"marks": [], "last_fire": {}, "wakes": {}, "confluence_wakes": {"2026-06-15": 8}}))
+        with path.open(encoding="utf-8") as fh:
+            self.assertEqual(list(csv.DictReader(fh))[-1]["status"], "shadow_long")
+        st = json.loads(detector.STATE.read_text())
+        self.assertEqual(st["confluence_wakes"]["2026-06-15"], 8)
+        self.assertEqual(st.get("confluence_fire") or {}, {})
 
     def test_missing_delta_quiet_cap_and_failed_post(self):
         import csv
-        close = self._books_for("BTC")
+        close = self._books_short("BTC")
         self.assertTrue(self.cycle([asset("BTC", mark=close, pct_24h=0.2, day=6_000_000)]))
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.calls[0][0]["delta_source"], "close_location")
@@ -285,7 +359,7 @@ class CycleTests(unittest.TestCase):
             self.assertEqual(list(csv.DictReader(fh))[0]["delta_source"], "close_location")
 
         start, end = (NOW - 2 * 3600) * 1000, (NOW + 60) * 1000
-        delta = _book("BTC", start, end)
+        delta = _book("BTC", start, end, buy=100.0, sell=5_000.0)
         self.freeze(3)
         detector.send = lambda payload, cfg: (_ for _ in ()).throw(AssertionError("noche"))
         self.assertTrue(self.cycle([
