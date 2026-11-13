@@ -1,0 +1,17 @@
+Esta rama la reescribe sola GitHub Actions (workflow "Detector de explosiones").
+No edites estos ficheros: el siguiente ciclo los sustituye.
+
+- data/detector_state.json
+  Memoria del detector: precios e interés abierto de hace unas horas, pausa por activo y contadores de avisos (día y hora).
+- signals/explosion_alerts.jsonl
+  Historial corto de avisos (una línea JSON por tanda). Si aún no ha habido avisos, este fichero no está.
+- data/scans/latest.md
+  Tabla del último ciclo, la misma que el resumen de Actions.
+- data/scans/AAAA-MM-DD.csv
+  Un candidato por fila. Solo se conservan los últimos 14 días.
+- data/shadow/AAAA-MM-DD.csv
+  Señales tempranas antiguas, si quedara alguna. Ya no se escriben.
+- data/confluence/AAAA-MM-DD.csv
+  Avisos confluence_1h (enviados, en silencio, sin delta, tope). Recuento hasta el 24 nov.
+
+No hay secretos aquí. La URL del webhook no se guarda en el repositorio.
