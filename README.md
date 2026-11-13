@@ -1,3 +1,5 @@
+Detector apagado el 13 nov 2026 por decisión del propietario; el repo se conserva como base para un futuro servidor.
+
 # Detector de explosiones (Hyperliquid)
 
 Este programa mira los perpetuos de Hyperliquid (el mercado principal y los de HIP-3, nunca el spot) y avisa cuando tres cosas técnicas se cumplen a la vez en una hora. No compra ni vende. Solo avisa.
