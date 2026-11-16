@@ -252,6 +252,17 @@ def _weekly_payload(now_ms):
     }
 
 
+def _collect_research(assets, snap, now):
+    """Order book, listings and liquidation proxy. Never raises into the books."""
+    try:
+        import market_research
+        wrote, notes = market_research.collect(assets, snap, now)
+        return bool(wrote), list(notes or [])
+    except Exception as exc:
+        paper.log(f"research: aviso, los libros no se tocan: {exc}")
+        return False, ["- Registros de investigación: fallo, los libros no se han tocado."]
+
+
 def send_test():
     payload = [{
         "test": True,
@@ -389,12 +400,17 @@ def run(now=None):
         lines.append(f"- Avisos de entrada o salida: {len(events)} (`{status}`).")
     else:
         lines.append("- Sin entradas ni salidas en esta pasada.")
+    research_wrote, research_notes = _collect_research(assets, snap, now)
+    lines.extend(research_notes)
     paper.write_summary(lines)
+    changed = changed or research_wrote
     if changed:
         bits = []
         if appended:
             bits.append(f"snapshot={len(assets)}")
         bits.append(f"eventos={len(events)}")
+        if research_wrote:
+            bits.append("research=1")
         paper.mark_ready("paper " + " ".join(bits))
     else:
         paper.log("paper: sin cambios. La rama detector-state no se toca.")

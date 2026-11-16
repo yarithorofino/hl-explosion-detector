@@ -14,6 +14,12 @@ data/squeeze4h/
 data/trapped_shorts1h/
 data/paper/
 data/market_log/
+data/orderbook_log/
+data/liq_proxy_log/
+data/liq_trades_log/
+data/liq_tape_log/
+data/listings_log.csv
+data/listings_snapshot.json
 data/delta_tape.json
 data/*.json.tmp
 signals/*.tmp

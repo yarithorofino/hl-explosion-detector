@@ -1,4 +1,5 @@
 # Paper de trend4h, squeeze4h y trapped_shorts1h.
+# La misma pasada acumula libro de órdenes, listados y un proxy de liquidaciones.
 # No envía órdenes. El cron solo corre con este fichero en la rama por defecto.
 # Los secrets se pasan por el entorno del paso y no se imprimen.
 

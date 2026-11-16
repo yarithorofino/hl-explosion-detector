@@ -72,7 +72,7 @@ for rel in listing.stdout.splitlines():
     def day_csv(prefix):
         return rel.startswith(prefix) and len(name) == 14 and name.endswith(".csv") and name[4] == "-" and name[7] == "-"
 
-    ok_scan = rel == "data/scans/latest.md" or day_csv("data/scans/") or day_csv("data/shadow/") or day_csv("data/setups/") or day_csv("data/confluence/") or day_csv("data/market_log/") or rel in {
+    ok_scan = rel == "data/scans/latest.md" or day_csv("data/scans/") or day_csv("data/shadow/") or day_csv("data/setups/") or day_csv("data/confluence/") or day_csv("data/market_log/") or day_csv("data/orderbook_log/") or day_csv("data/liq_proxy_log/") or day_csv("data/liq_trades_log/") or day_csv("data/liq_tape_log/") or rel in {
         "data/trend4h/open.json",
         "data/trend4h/trades.csv",
         "data/squeeze4h/open.json",
@@ -80,6 +80,8 @@ for rel in listing.stdout.splitlines():
         "data/trapped_shorts1h/open.json",
         "data/trapped_shorts1h/trades.csv",
         "data/paper/runner.json",
+        "data/listings_log.csv",
+        "data/listings_snapshot.json",
     }
     if not ok_scan:
         continue
