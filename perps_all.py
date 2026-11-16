@@ -9,6 +9,7 @@ import http.client
 import json
 import random
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -29,6 +30,12 @@ MIN_GAP = 0.15
 _spent = []  # (monotonic time, weight)
 _blocked_until = 0.0
 _next_ok = 0.0
+_lock = threading.Lock()
+# Documented weight 2. Everything else we call stays at 20, plus the candle extra.
+_WEIGHT_2 = {
+    "l2Book", "allMids", "clearinghouseState", "orderStatus",
+    "spotClearinghouseState", "exchangeStatus",
+}
 
 
 def _body_weight(body):
@@ -42,6 +49,8 @@ def _body_weight(body):
         }.get(req.get("interval"), 3_600_000)
         n = max(1, span // step + 1) if span else 30
         return 20 + (n + 59) // 60
+    if body.get("type") in _WEIGHT_2:
+        return 2
     return 20
 
 
@@ -56,7 +65,16 @@ def _label(body):
 
 
 def _acquire(weight):
-    """One wait at most, then send. Never loops if the clock does not move."""
+    """One wait at most, then send. Never loops if the clock does not move.
+
+    The lock lets the research logger overlap HTTP round-trips. The gap and
+    the weight budget stay shared with the paper calls.
+    """
+    with _lock:
+        _acquire_unlocked(weight)
+
+
+def _acquire_unlocked(weight):
     global _blocked_until, _spent, _next_ok
     now = time.time()
     if _blocked_until > now:
@@ -121,7 +139,8 @@ def post(body, timeout=30, attempts=4):
             wait = _retry_wait(e, delay)
             if e.code == 429:
                 global _blocked_until
-                _blocked_until = time.time() + wait
+                with _lock:
+                    _blocked_until = time.time() + wait
             print(
                 f"hyperliquid {label} HTTP {e.code}, espero {wait:.1f}s ({attempt}/{attempts})",
                 flush=True,

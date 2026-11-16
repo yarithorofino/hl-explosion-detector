@@ -98,11 +98,28 @@ for book_name in ("trend4h", "squeeze4h", "trapped_shorts1h"):
 runner = Path("data/paper/runner.json")
 if runner.exists():
     abort_if_secret(runner.read_text(encoding="utf-8"), "paper runner")
-mlog = Path("data/market_log")
-if mlog.exists():
-    for child in mlog.iterdir():
-        if child.is_file():
-            abort_if_secret(child.read_text(encoding="utf-8", errors="replace"), f"market_log {child.name}")
+for label, folder in (
+    ("market_log", "data/market_log"),
+    ("orderbook_log", "data/orderbook_log"),
+    ("liq_proxy_log", "data/liq_proxy_log"),
+    ("liq_trades_log", "data/liq_trades_log"),
+    ("liq_tape_log", "data/liq_tape_log"),
+):
+    folder_path = Path(folder)
+    if folder_path.exists():
+        for child in folder_path.iterdir():
+            if child.is_file():
+                abort_if_secret(
+                    child.read_text(encoding="utf-8", errors="replace"),
+                    f"{label} {child.name}",
+                )
+for extra in ("data/listings_log.csv", "data/listings_snapshot.json"):
+    extra_path = Path(extra)
+    if extra_path.exists():
+        abort_if_secret(
+            extra_path.read_text(encoding="utf-8", errors="replace"),
+            extra,
+        )
 print(f"estado valido: marcas={len(d['marks'])} cooldowns={len(d['last_fire'])} dias_wake={len(d['wakes'])}")
 PY
 
@@ -129,6 +146,32 @@ add_blob() {
   local blob
   blob=$(git hash-object -w "$file")
   git update-index --add --cacheinfo "100644,${blob},${path}"
+}
+
+add_dated_csvs() {
+  local dir="$1"
+  local label="$2"
+  local cutoff="$3"
+  if [[ ! -d "$dir" ]]; then
+    return
+  fi
+  while IFS= read -r f; do
+    base=$(basename "$f")
+    case "$base" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv)
+        day=${base%.csv}
+        if [[ "$day" < "$cutoff" ]]; then
+          echo "${label} antiguo, no se conserva: $base"
+          continue
+        fi
+        add_blob "${dir}/${base}" "$f"
+        ;;
+      *)
+        echo "Fichero de ${label} no permitido: $f" >&2
+        exit 1
+        ;;
+    esac
+  done < <(find "$dir" -type f | sort)
 }
 
 add_blob "data/detector_state.json" "data/detector_state.json"
@@ -229,25 +272,18 @@ if [[ -s data/paper/runner.json ]]; then
   add_blob "data/paper/runner.json" "data/paper/runner.json"
 fi
 
-if [[ -d data/market_log ]]; then
-  cutoff=$(date -u -d '120 days ago' +%F)
-  while IFS= read -r f; do
-    base=$(basename "$f")
-    case "$base" in
-      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv)
-        day=${base%.csv}
-        if [[ "$day" < "$cutoff" ]]; then
-          echo "market_log antiguo, no se conserva: $base"
-          continue
-        fi
-        add_blob "data/market_log/$base" "$f"
-        ;;
-      *)
-        echo "Fichero de market_log no permitido: $f" >&2
-        exit 1
-        ;;
-    esac
-  done < <(find data/market_log -type f | sort)
+cutoff=$(date -u -d '120 days ago' +%F)
+add_dated_csvs data/market_log market_log "$cutoff"
+add_dated_csvs data/orderbook_log orderbook_log "$cutoff"
+add_dated_csvs data/liq_proxy_log liq_proxy_log "$cutoff"
+add_dated_csvs data/liq_trades_log liq_trades_log "$cutoff"
+add_dated_csvs data/liq_tape_log liq_tape_log "$cutoff"
+
+if [[ -s data/listings_log.csv ]]; then
+  add_blob "data/listings_log.csv" "data/listings_log.csv"
+fi
+if [[ -s data/listings_snapshot.json ]]; then
+  add_blob "data/listings_snapshot.json" "data/listings_snapshot.json"
 fi
 
 cat > "$LEEME" <<'EOF'
@@ -276,6 +312,16 @@ No edites estos ficheros: el siguiente ciclo los sustituye.
   Fecha del último resumen semanal.
 - data/market_log/AAAA-MM-DD.csv
   Snapshot horario de perps. Se conservan 120 días.
+- data/orderbook_log/AAAA-MM-DD.csv
+  Profundidad del libro (0,5%, 1% y 2%) y spread. Se conservan 120 días.
+- data/listings_log.csv y data/listings_snapshot.json
+  Altas, bajas y cambios de apalancamiento máximo, y la última foto del universo.
+- data/liq_proxy_log/AAAA-MM-DD.csv
+  Proxy horario de OI, rango y volumen. No es una liquidación. Se conservan 120 días.
+- data/liq_trades_log/AAAA-MM-DD.csv
+  Trades públicos que traen marca de liquidación, si el payload la trae.
+- data/liq_tape_log/AAAA-MM-DD.csv
+  Muestra de la cinta pública: duración, trades vistos y cuántos venían marcados.
 
 No hay secretos aquí. La URL del webhook no se guarda en el repositorio.
 EOF
@@ -293,6 +339,11 @@ while IFS= read -r f; do
     data/trapped_shorts1h/open.json|data/trapped_shorts1h/trades.csv) ;;
     data/paper/runner.json) ;;
     data/market_log/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
+    data/orderbook_log/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
+    data/liq_proxy_log/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
+    data/liq_trades_log/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
+    data/liq_tape_log/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
+    data/listings_log.csv|data/listings_snapshot.json) ;;
     *)
       echo "Ruta inesperada en el estado: $f" >&2
       exit 1

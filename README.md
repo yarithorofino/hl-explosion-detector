@@ -189,7 +189,41 @@ En un repositorio público GitHub apaga los horarios tras 60 días sin actividad
 
 Tres libros de papel, separados. Cada uno arriesga el **0,25%** de **10.000 USDC** de papel por operación (25 USDC hasta el stop inicial). La comisión es **0,07%** por lado. El funding horario se suma aproximadamente, sobre el nocional de la entrada: si el funding es positivo, el largo lo paga y el corto lo cobra. El R es el resultado neto dividido por esos 25 USDC. No hay claves de exchange y no se envía ninguna orden. La API que se usa es la info pública.
 
-Los tres comparten el workflow **Paper 4h** (`cron: 2 * * * *`, a las :02 UTC) y la rama `detector-state`. Cada hora se añade una fila por perp a `data/market_log/AAAA-MM-DD.csv` (moneda, mark, OI en contratos, OI en dólares, funding, premium, volumen de 24h, dex). Se guardan 120 días. La lógica de 4h solo corre cuando hay una vela de 4h recién cerrada (cierra a las 0, 4, 8, 12, 16 y 20 UTC). Si el job llega tarde, procesa la vela que ya esté cerrada; no se la salta por no ser exactamente las :02.
+Los tres comparten el workflow **Paper 4h** (`cron: 2 * * * *`, a las :02 UTC) y la rama `detector-state`. Cada hora se añade una fila por perp a `data/market_log/AAAA-MM-DD.csv` (moneda, mark, OI en contratos, OI en dólares, funding, premium, volumen de 24h, dex). Se guardan 120 días. Esas columnas no cambian: trapped_shorts1h sigue leyendo el OI en contratos de ese fichero. La lógica de 4h solo corre cuando hay una vela de 4h recién cerrada (cierra a las 0, 4, 8, 12, 16 y 20 UTC). Si el job llega tarde, procesa la vela que ya esté cerrada; no se la salta por no ser exactamente las :02.
+
+### Registro para investigación
+
+Después de los libros, la misma pasada escribe tres registros más. Si uno falla, el fallo queda en el log y los libros no se tocan. No hay claves: solo `https://api.hyperliquid.xyz/info` y el websocket público de trades.
+
+**Libro.** `data/orderbook_log/AAAA-MM-DD.csv`, una fila por perp y hora. Entran los 120 perps con más volumen de 24 horas y, además, cualquier perp del dex principal o de un HIP-3 con más de 1 millón de dólares. El 16 nov 2026 el universo listado era de unos 350 nombres y el corte dejaba 137. `l2Book` devuelve como mucho 20 niveles por lado. En BTC, el libro sin agregar no llega al 0,05% del mid, así que el spread en puntos básicos sale del libro a precisión completa y la profundidad sale del agregado más fino que todavía distingue esa banda y la cubre (`nSigFigs` 3 en BTC; 4 y 3, o 3 y 2, cuando el precio cae en un cubo más ancho). La profundidad es nocional (precio por tamaño) de bid y de ask dentro del 0,5%, del 1% y del 2% del mid. El desequilibrio es `(bid − ask) / (bid + ask)`. `complete_*` vale 1 cuando esos niveles llegan hasta el borde de la banda; si vale 0, la cifra es un mínimo porque el libro se cortó antes. Una banda más estrecha que el cubo se deja vacía. El precio de un nivel agregado es el del cubo, así que el borde puede quedar a un cubo de distancia. `sig_*` dice qué agregado se usó (`full` es el libro sin agregar). Se guardan 120 días.
+
+**Listados.** Cada hora se compara el universo (dex principal y HIP-3, con el apalancamiento máximo) con `data/listings_snapshot.json`. La primera hora solo guarda la foto: no anota como alta todo lo que ya cotiza. Desde la siguiente, `data/listings_log.csv` añade una fila con la hora UTC en que se ve el cambio (`listing`, `delisting` o `max_leverage`). Si un dex no responde, sus monedas se copian de la foto anterior y no se dan de baja. Si `perpDexs` falla, los HIP-3 que no se han podido pedir se conservan igual.
+
+**Liquidaciones.** Hyperliquid no tiene un feed público de liquidaciones de todo el mercado, usable desde un job horario.
+
+- El websocket `trades` y `recentTrades` devuelven `coin`, `side`, `px`, `sz`, `hash`, `time`, `tid` y `users`. No hay marca de liquidación. Está así en el tipo `WsTrade` de la documentación y en un print real de `recentTrades` de BTC del 16 nov 2026.
+- El campo `liquidation` (`liquidatedUser`, `markPx`, `method`) existe en los fills de una cartera (`userFills`, `userFillsByTime`) y en `userEvents`. Eso es por dirección, con un tope de usuarios en el websocket, y no cubre el mercado sin una lista de carteras. Este programa no la pide.
+
+Lo que se guarda, y cómo leerlo:
+
+- `data/liq_trades_log/AAAA-MM-DD.csv` es una liquidación real solo en este sentido: un trade del websocket público cuyo payload trae el campo `liquidation`. Hoy ese fichero sale vacío. Si el campo apareciera, cada fila sería un print visto durante la muestra, no el total de la hora. No se guardan las direcciones de `users`.
+- `data/liq_tape_log/AAAA-MM-DD.csv` es la prueba de que la muestra corrió: una fila por hora con los segundos, las monedas, los trades vistos y cuántos traían marca. Son 3 minutos sobre las 40 monedas de más volumen, en paralelo con el resto de lecturas. Una muestra sin marcas no dice que no hubiera liquidaciones: dice que el print público no las señala.
+- `data/liq_proxy_log/AAAA-MM-DD.csv` es un proxy, no una liquidación. `proxy` vale 1 cuando coinciden tres cosas: el OI en contratos cae al menos un 2% frente a la fila anterior de `market_log` (exactamente una hora antes; si falta esa fila, el hueco queda en `oi_gap_h` y `proxy` queda en 0), el rango de la vela de 1h recién cerrada, `(máximo − mínimo) / apertura`, es al menos un 1%, y el nocional de esa vela es al menos el doble de la media de las 24 horas cerradas anteriores (hacen falta al menos 12). Un cierre voluntario, un vencimiento o un hueco de la foto pueden dar el mismo dibujo. `oi_drop_pct`, `range_pct` y `vol_mult` van sueltas para poder repetir el cálculo con otros umbrales. No se rellena el pasado.
+
+Para estudiarlos hace falta pandas. Los CSV viven en `detector-state`, no en `main`:
+
+```
+git fetch origin detector-state
+git checkout origin/detector-state -- data/market_log data/orderbook_log data/liq_proxy_log data/liq_trades_log data/liq_tape_log data/listings_log.csv data/listings_snapshot.json
+```
+
+```python
+import research_logs
+books = research_logs.load_orderbook_log("data")
+proxy = research_logs.load_liq_proxy_log("data")
+```
+
+Con el universo del 16 nov 2026 (137 nombres), el libro son unos 1–2 minutos (dos o tres `l2Book` por nombre, peso 2) y las velas del proxy unos 4–6 minutos (peso 20 más el extra por velas, con el cupo de 800/min que ya usa el cliente). La cinta de 3 minutos corre a la vez, así que no se suma entera. En total unos 6–12 minutos encima del paper, dentro del tope de 40 del workflow. Una fila realista del libro ocupa unos 200 bytes y una del proxy unos 150: cerca de 1,5 MB al día y unos 180 MB a los 120 días, además del `market_log`. La cinta y los listados no mueven esa cifra.
 
 Un disparo manual con **test** manda, además, un solo POST `test: true` y `paper: true`. Ese objeto no abre ni cierra una posición. La pasada sigue haciendo el paper normal.
 
@@ -233,6 +267,11 @@ En la rama **`detector-state`**, junto a la memoria del detector:
 - `data/squeeze4h/open.json` y `data/squeeze4h/trades.csv`
 - `data/trapped_shorts1h/open.json` y `data/trapped_shorts1h/trades.csv`
 - `data/paper/runner.json` — el lunes ya enviado
-- `data/market_log/AAAA-MM-DD.csv`
+- `data/market_log/AAAA-MM-DD.csv` — OI horario; las columnas no cambian
+- `data/orderbook_log/AAAA-MM-DD.csv` — profundidad y spread
+- `data/listings_log.csv` y `data/listings_snapshot.json` — altas, bajas y apalancamiento
+- `data/liq_proxy_log/AAAA-MM-DD.csv` — proxy de OI, rango y volumen
+- `data/liq_trades_log/AAAA-MM-DD.csv` — trades públicos con campo `liquidation`
+- `data/liq_tape_log/AAAA-MM-DD.csv` — muestra de la cinta
 
 El mismo permiso de escritura de Actions vale para los dos workflows. No se pisan entre sí si no corren a la vez: cada uno restaura la rama y la vuelve a guardar entera.
