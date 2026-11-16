@@ -78,6 +78,31 @@ if conf.exists():
     for child in conf.iterdir():
         if child.is_file():
             abort_if_secret(child.read_text(encoding="utf-8", errors="replace"), f"la confluencia {child.name}")
+
+def check_book(name):
+    path = Path("data") / name / "open.json"
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    abort_if_secret(text, f"{name} open")
+    book = json.loads(text)
+    if not isinstance(book, dict) or not isinstance(book.get("positions"), list):
+        print(f"{name}/open.json no tiene la forma esperada; no se guarda", file=sys.stderr)
+        sys.exit(1)
+    trades = path.with_name("trades.csv")
+    if trades.exists():
+        abort_if_secret(trades.read_text(encoding="utf-8", errors="replace"), f"{name} trades")
+
+for book_name in ("trend4h", "squeeze4h", "trapped_shorts1h"):
+    check_book(book_name)
+runner = Path("data/paper/runner.json")
+if runner.exists():
+    abort_if_secret(runner.read_text(encoding="utf-8"), "paper runner")
+mlog = Path("data/market_log")
+if mlog.exists():
+    for child in mlog.iterdir():
+        if child.is_file():
+            abort_if_secret(child.read_text(encoding="utf-8", errors="replace"), f"market_log {child.name}")
 print(f"estado valido: marcas={len(d['marks'])} cooldowns={len(d['last_fire'])} dias_wake={len(d['wakes'])}")
 PY
 
@@ -175,8 +200,58 @@ if [[ -d data/confluence ]]; then
   done < <(find data/confluence -type f | sort)
 fi
 
+add_book() {
+  local name="$1"
+  if [[ -s "data/${name}/open.json" ]]; then
+    add_blob "data/${name}/open.json" "data/${name}/open.json"
+  fi
+  if [[ -s "data/${name}/trades.csv" ]]; then
+    add_blob "data/${name}/trades.csv" "data/${name}/trades.csv"
+  fi
+  if [[ -d "data/${name}" ]]; then
+    while IFS= read -r f; do
+      base=$(basename "$f")
+      case "$base" in
+        open.json|trades.csv|*.tmp) ;;
+        *)
+          echo "Fichero de ${name} no permitido: $f" >&2
+          exit 1
+          ;;
+      esac
+    done < <(find "data/${name}" -type f | sort)
+  fi
+}
+add_book trend4h
+add_book squeeze4h
+add_book trapped_shorts1h
+
+if [[ -s data/paper/runner.json ]]; then
+  add_blob "data/paper/runner.json" "data/paper/runner.json"
+fi
+
+if [[ -d data/market_log ]]; then
+  cutoff=$(date -u -d '120 days ago' +%F)
+  while IFS= read -r f; do
+    base=$(basename "$f")
+    case "$base" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv)
+        day=${base%.csv}
+        if [[ "$day" < "$cutoff" ]]; then
+          echo "market_log antiguo, no se conserva: $base"
+          continue
+        fi
+        add_blob "data/market_log/$base" "$f"
+        ;;
+      *)
+        echo "Fichero de market_log no permitido: $f" >&2
+        exit 1
+        ;;
+    esac
+  done < <(find data/market_log -type f | sort)
+fi
+
 cat > "$LEEME" <<'EOF'
-Esta rama la reescribe sola GitHub Actions (workflow "Detector de explosiones").
+Esta rama la reescriben GitHub Actions (workflows "Detector de explosiones" y "Paper 4h").
 No edites estos ficheros: el siguiente ciclo los sustituye.
 
 - data/detector_state.json
@@ -191,6 +266,16 @@ No edites estos ficheros: el siguiente ciclo los sustituye.
   Señales tempranas antiguas, si quedara alguna. Ya no se escriben.
 - data/confluence/AAAA-MM-DD.csv
   Avisos confluence_1h (enviados, en silencio, sin delta, tope). Recuento hasta el 24 nov.
+- data/trend4h/open.json y data/trend4h/trades.csv
+  Libro de paper de la tendencia 4h (posiciones abiertas y cierres).
+- data/squeeze4h/open.json y data/squeeze4h/trades.csv
+  Libro de paper del squeeze 4h.
+- data/trapped_shorts1h/open.json y data/trapped_shorts1h/trades.csv
+  Libro de paper de trapped shorts 1h.
+- data/paper/runner.json
+  Fecha del último resumen semanal.
+- data/market_log/AAAA-MM-DD.csv
+  Snapshot horario de perps. Se conservan 120 días.
 
 No hay secretos aquí. La URL del webhook no se guarda en el repositorio.
 EOF
@@ -203,6 +288,11 @@ while IFS= read -r f; do
     data/shadow/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
     data/setups/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
     data/confluence/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
+    data/trend4h/open.json|data/trend4h/trades.csv) ;;
+    data/squeeze4h/open.json|data/squeeze4h/trades.csv) ;;
+    data/trapped_shorts1h/open.json|data/trapped_shorts1h/trades.csv) ;;
+    data/paper/runner.json) ;;
+    data/market_log/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
     *)
       echo "Ruta inesperada en el estado: $f" >&2
       exit 1
