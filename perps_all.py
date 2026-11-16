@@ -36,7 +36,10 @@ def _body_weight(body):
     if body.get("type") == "candleSnapshot":
         req = body.get("req") or {}
         span = max(0, int(req.get("endTime") or 0) - int(req.get("startTime") or 0))
-        step = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000}.get(req.get("interval"), 3_600_000)
+        step = {
+            "1m": 60_000, "5m": 300_000, "15m": 900_000,
+            "1h": 3_600_000, "4h": 14_400_000,
+        }.get(req.get("interval"), 3_600_000)
         n = max(1, span // step + 1) if span else 30
         return 20 + (n + 59) // 60
     return 20

@@ -1,0 +1,54 @@
+# Paper de trend4h, squeeze4h y trapped_shorts1h.
+# No envía órdenes. El cron solo corre con este fichero en la rama por defecto.
+# Los secrets se pasan por el entorno del paso y no se imprimen.
+
+name: Paper 4h
+
+on:
+  schedule:
+    - cron: "2 * * * *"
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Enviar un POST de prueba al webhook (test:true)"
+        required: false
+        default: false
+        type: boolean
+
+# No se cancela la ejecución que está a punto de guardar el estado.
+concurrency:
+  group: trend4h
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  paper:
+    name: paper
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Descargar el código
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+          fetch-depth: 1
+
+      - name: Preparar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Pasada paper
+        env:
+          EXPLOSION_WEBHOOK_URL: ${{ secrets.EXPLOSION_WEBHOOK_URL }}
+          EXPLOSION_WEBHOOK_AUTH: ${{ secrets.EXPLOSION_WEBHOOK_AUTH }}
+          TREND4H_TEST: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.test == 'true' || inputs.test == true) && 'true' || 'false' }}
+          PYTHONUNBUFFERED: "1"
+        run: bash scripts/paper_run.sh

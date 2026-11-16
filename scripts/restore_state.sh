@@ -69,15 +69,18 @@ if listing.returncode != 0:
 n_scans = 0
 for rel in listing.stdout.splitlines():
     name = rel.rsplit("/", 1)[-1]
-    ok_scan = rel == "data/scans/latest.md" or (
-        rel.startswith("data/scans/") and len(name) == 14 and name.endswith(".csv") and name[4] == "-" and name[7] == "-"
-    ) or (
-        rel.startswith("data/shadow/") and len(name) == 14 and name.endswith(".csv") and name[4] == "-" and name[7] == "-"
-    ) or (
-        rel.startswith("data/setups/") and len(name) == 14 and name.endswith(".csv") and name[4] == "-" and name[7] == "-"
-    ) or (
-        rel.startswith("data/confluence/") and len(name) == 14 and name.endswith(".csv") and name[4] == "-" and name[7] == "-"
-    )
+    def day_csv(prefix):
+        return rel.startswith(prefix) and len(name) == 14 and name.endswith(".csv") and name[4] == "-" and name[7] == "-"
+
+    ok_scan = rel == "data/scans/latest.md" or day_csv("data/scans/") or day_csv("data/shadow/") or day_csv("data/setups/") or day_csv("data/confluence/") or day_csv("data/market_log/") or rel in {
+        "data/trend4h/open.json",
+        "data/trend4h/trades.csv",
+        "data/squeeze4h/open.json",
+        "data/squeeze4h/trades.csv",
+        "data/trapped_shorts1h/open.json",
+        "data/trapped_shorts1h/trades.csv",
+        "data/paper/runner.json",
+    }
     if not ok_scan:
         continue
     blob = show(rel)

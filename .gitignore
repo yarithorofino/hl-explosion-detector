@@ -9,6 +9,11 @@ data/state_ready
 data/run_summary.txt
 data/scans/
 data/confluence/
+data/trend4h/
+data/squeeze4h/
+data/trapped_shorts1h/
+data/paper/
+data/market_log/
 data/delta_tape.json
 data/*.json.tmp
 signals/*.tmp

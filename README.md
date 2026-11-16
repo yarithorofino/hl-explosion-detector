@@ -1,5 +1,7 @@
 Detector apagado el 13 nov 2026 por decisión del propietario; el repo se conserva como base para un futuro servidor.
 
+El paper (trend4h, squeeze4h y trapped_shorts1h) es otro programa en el mismo repo. No compra ni vende. El horario está en `.github/workflows/trend4h.yml`.
+
 # Detector de explosiones (Hyperliquid)
 
 Este programa mira los perpetuos de Hyperliquid (el mercado principal y los de HIP-3, nunca el spot) y avisa cuando tres cosas técnicas se cumplen a la vez en una hora. No compra ni vende. Solo avisa.
@@ -182,3 +184,55 @@ En un repositorio público GitHub apaga los horarios tras 60 días sin actividad
 - **Guardar estado** con 403 → falta **Read and write permissions**.
 - No hay ejecuciones → el pull request no está en `main`, o el horario se apagó.
 - Muchas filas `sin_delta` al principio → la cinta todavía no ha cubierto una hora. No se envían.
+
+## Paper: tendencia, squeeze y trapped shorts
+
+Tres libros de papel, separados. Cada uno arriesga el **0,25%** de **10.000 USDC** de papel por operación (25 USDC hasta el stop inicial). La comisión es **0,07%** por lado. El funding horario se suma aproximadamente, sobre el nocional de la entrada: si el funding es positivo, el largo lo paga y el corto lo cobra. El R es el resultado neto dividido por esos 25 USDC. No hay claves de exchange y no se envía ninguna orden. La API que se usa es la info pública.
+
+Los tres comparten el workflow **Paper 4h** (`cron: 2 * * * *`, a las :02 UTC) y la rama `detector-state`. Cada hora se añade una fila por perp a `data/market_log/AAAA-MM-DD.csv` (moneda, mark, OI en contratos, OI en dólares, funding, premium, volumen de 24h, dex). Se guardan 120 días. La lógica de 4h solo corre cuando hay una vela de 4h recién cerrada (cierra a las 0, 4, 8, 12, 16 y 20 UTC). Si el job llega tarde, procesa la vela que ya esté cerrada; no se la salta por no ser exactamente las :02.
+
+Un disparo manual con **test** manda, además, un solo POST `test: true` y `paper: true`. Ese objeto no abre ni cierra una posición. La pasada sigue haciendo el paper normal.
+
+### trend4h
+
+Universo fijo del dex principal: AAVE, ADA, ASTER, AVAX, BNB, BTC, CRV, DOGE, ENA, ETH, FARTCOIN, HYPE, LAUNCHCOIN, LINK, LIT, MKR, PAXG, PUMP, SOL, SUI, TAO, XPL, XRP, ZEC, kPEPE. Si una moneda no está en `metaAndAssetCtxs` o está delistada, se anota en el registro y se salta.
+
+En velas de 4h ya cerradas: EMA100 y EMA200 del cierre (hacen falta al menos 600 velas) y ATR(14) de Wilder. Si la EMA100 cruza por encima de la EMA200, largo; si cruza por debajo, corto. La entrada de papel es la apertura de la vela de 4h siguiente. Si esa apertura todavía no está en la respuesta, se usa la marca del momento. El stop inicial es la entrada menos (o más, en corto) 3 ATR de la vela de la señal. No hay take profit.
+
+Se sale si el máximo o el mínimo de una vela de 4h toca el stop (si la vela abre ya al otro lado, el fill es la apertura), si hay un cruce contrario (la salida y la entrada opuesta son la apertura siguiente: se da la vuelta) o al cumplir 180 velas (30 días). Como máximo 10 posiciones, una por moneda. Lo que no cabe se anota `skipped_cap` y no se envía.
+
+### squeeze4h
+
+Solo largos. Universo: perps del dex principal con volumen de 24h de al menos 5 millones de dólares. HIP-3 no entra. Se mira cuando cierra una vela de 4h.
+
+La anchura de Bollinger(20, 2) es `(banda alta − banda baja) / media`, con desviación poblacional. `bwpct` es el percentil de esa anchura en las últimas 180 velas de 4h (de 0 a 1). Hace falta que el mínimo de las tres velas anteriores a la de disparo sea 0,05 o menos. El disparo: el cierre supera el máximo de las 20 velas anteriores y el volumen (el de la vela, en moneda) es al menos 1,5 veces la media de esas 20.
+
+La salida es común con trapped shorts. Stop inicial: entrada − 3 ATR(14). El trailing es el máximo desde la entrada menos 5 ATR(14) de la vela que se acaba de cerrar, y solo sube. A los 240 velas se sale en la apertura siguiente. Máximo 10 posiciones, una por moneda.
+
+### trapped_shorts1h
+
+Solo largos, mismo universo líquido de 5 millones, sin HIP-3. Cada hora, sobre la vela de 1h que acaba de cerrar.
+
+El interés abierto sale solo de `data/market_log` (contratos, no dólares). Hasta que ese registro no cubre 7 días el libro no abre nada y el registro dice `warming_up`. No se rellena el pasado. Cuando ya hay historia: el OI de ahora es al menos un 20% mayor que el de hace 168 horas, el precio de las últimas 168 velas de 1h está entre −15% y +5%, y la prima actual es negativa. El disparo: la vela cerrada sube al menos un 3% de la apertura al cierre, con volumen de al menos 3 veces la media de las 20 velas anteriores.
+
+Stop inicial: entrada − 2 ATR(14). Trailing: máximo desde la entrada menos 4 ATR, y solo sube. A las 120 velas se sale. Máximo 5 posiciones, una por moneda.
+
+### Avisos
+
+Solo hay POST en una entrada, en una salida (con R) y en el resumen de los lunes a las 08:02 UTC. El webhook es el mismo de antes (`EXPLOSION_WEBHOOK_URL` y `EXPLOSION_WEBHOOK_AUTH`). Si faltan, la pasada sigue y anota `dry-run`. El cuerpo es una lista, como el detector.
+
+Una entrada lleva `type` `trend4h_entry`, `squeeze4h_entry` o `trapped_shorts1h_entry`, y `paper: true`, moneda, lado, entrada, stop, ATR, EMA100 y EMA200 (null si ese libro no las usa), la hora de la vela y la marca. Una salida es `*_exit` y añade el R y el motivo (`stop`, `reverse` o `time`). `skipped_cap` no se envía.
+
+El lunes a las 08:02 el tipo es `trend4h_weekly`. Arriba van las cifras de trend4h (posiciones abiertas, cierres, R acumulada, acierto). `books` repite eso para los tres libros, con el recuento de la última semana.
+
+### Dónde queda el papel
+
+En la rama **`detector-state`**, junto a la memoria del detector:
+
+- `data/trend4h/open.json` y `data/trend4h/trades.csv`
+- `data/squeeze4h/open.json` y `data/squeeze4h/trades.csv`
+- `data/trapped_shorts1h/open.json` y `data/trapped_shorts1h/trades.csv`
+- `data/paper/runner.json` — el lunes ya enviado
+- `data/market_log/AAAA-MM-DD.csv`
+
+El mismo permiso de escritura de Actions vale para los dos workflows. No se pisan entre sí si no corren a la vez: cada uno restaura la rama y la vuelve a guardar entera.
