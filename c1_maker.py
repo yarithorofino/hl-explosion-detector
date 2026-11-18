@@ -3,162 +3,204 @@
 
 Evaluated on closed 1h candles of every main-dex Hyperliquid perp. No
 liquidity filter and no exchange keys. This module never places an order.
+The live book is variant A. B and C are the same engine with other stops,
+targets, holds and, for C, a looser drawdown.
 
-Signal on a closed 1h bar, over the 48 hourly bars that end on that bar
-(contiguous; a gap invalidates the window):
+A bar can signal only when the 48 hourly closes that end on it, and the 24
+hourly highs that end on it, are contiguous. A missing hour invalidates
+that window.
 
-- max high >= 1.40 x min low (a pump of at least 40%)
-- the close is 3% to 6% under that high, inclusive
-- the bar return close/open - 1 is -3% or worse
+- up48 = close / min(close of those 48 bars) - 1 >= 0.40
+- dd24 = close / max(high of those 24 bars) - 1 <= dd24_max
+  (A and B: -0.06, at least 6% under the 24h high, no upper bound.
+   C: -0.03.)
+- ret1h = close / previous close - 1 <= -0.03
 
-A pump of 100% or more (high >= 2 x low) sets `ta_extreme` on the alert.
-That flag does not change the order.
+up48 >= 1 (a 100% rise in closes) sets `ta_extreme` and does not change
+the order. A new signal on a coin is ignored when it falls inside 12 bars
+of that coin's previous signal, or while that coin already has a resting
+limit or an open position.
 
-The order is a sell limit at close + 0.25 * ATR(14), live for the next 3
-bars. A naive fill is a later bar whose high reaches the limit. A
-conservative fill needs the high to clear the limit by at least 0.05%
-(the stand-in for one tick). Both fill at the limit and pay the maker fee.
-The same signal can record both outcomes. They share one coin slot.
+The order is a sell limit at the signal close + 0.25 * ATR(14), live for
+the next 3 bars. It fills only when a bar's high is strictly above
+limit * (1 + 0.0005). The fill price is the limit and the fee is maker
+0.015%. There is no touch-fill.
 
-After a fill, SL = entry + 1.75 * ATR (taker, 0.045%) and TP = entry - 1R
-(maker, 0.015%), where 1R is that same ATR distance. Max hold is 48 bars,
-then the exit is the close (taker). On the maker fill bar only the stop is
-eligible: the bar's low can print before price trades up to the limit. If a
-later bar trades both the stop and the target, the stop wins. One position
-per coin, at most 10 coins, each risking 0.25% of 1,000 USDC (2.50 USDC).
+After the fill, 1R is the distance from the entry to the stop.
+Variant A: stop = entry + 1.5 * ATR, target = entry - 1R, hold 12 bars.
+Variant B: stop = entry + 2 * ATR, target = entry - 1R, hold 24 bars.
+Variant C: the looser drawdown above, stop = entry + 2 * ATR,
+target = entry - 1.5R, hold 36 bars.
 
-An order that never fills is logged too. The counterfactual is a taker
-entry at the next bar's open, with the same stop, target and hold, so the
-fill can be compared with the trade the limit refused.
+The stop is a taker. It may fire on the fill bar. The fill is the stop,
+or the open when the bar opens through it, worsened by 0.01% slippage.
+The fee on that price is 0.045%. The target is a maker buy. It cannot
+fill on the entry bar, and it fills only when the low trades strictly
+below target * (1 - 0.0005), at the target price, maker 0.015%. A bar
+that reaches both exits at the stop. The time exit is the close of the
+last hold bar, worsened by the same 0.01% and charged the taker fee.
+Funding is added with the same sign as the other paper books. One coin
+at a time, at most 10 coins, each risking 0.25% of 1,000 USDC.
 
-Each hourly run records the public l2Book for orders that are still
-resting: best ask, ask-side notional at or inside the limit, and whether
-the limit sits inside the spread, beyond the best ask, or through the bid.
+An order that never fills is logged with a taker entry at the next open
+(same slippage, stop, target and hold) so the fill can be compared with
+the trade the limit refused.
 """
 import json
 
 import paper
 
 BOOK = "c1_maker"
-WINDOW = 48
-PUMP_MIN = 1.40
-PUMP_EXTREME = 2.0
-CLOSE_OFF_MIN = 0.03
-CLOSE_OFF_MAX = 0.06
-BAR_DROP = -0.03
+UP_WINDOW = 48
+DD_WINDOW = 24
+UP48_MIN = 0.40
+UP48_EXTREME = 1.0
+RET1H_MAX = -0.03
 LIMIT_ATR = 0.25
 ATR_PERIOD = 14
 VALID_BARS = 3
-SL_ATR = 1.75
-MAX_HOLD = 48
+SIGNAL_GAP = 12
 MAX_POSITIONS = 10
 EQUITY_USDC = 1000.0
 RISK_PCT = 0.0025
 RISK_USD = EQUITY_USDC * RISK_PCT
 FEE_MAKER = 0.00015
 FEE_TAKER = 0.00045
-# High must clear the limit by this fraction. 0.05% stands in for one tick.
-CONSERVATIVE_FRAC = 0.0005
+# Strict trade-through. 0.05% stands in for one tick.
+TRADE_THROUGH = 0.0005
+# Taker slippage, the same 0.01% the confluence research applies as a worse fill.
+SLIPPAGE = 0.0001
 BOOK_LEVELS = 20
 FETCH_BARS = 400
+LIVE_VARIANT = "A"
 
 FEE_RATE = {"maker": FEE_MAKER, "taker": FEE_TAKER}
 
+# dd24_max is the most-positive drawdown that still qualifies (a more
+# negative reading is a deeper fade). tp_r is the target in units of the
+# initial stop distance.
+VARIANTS = {
+    "A": {
+        "name": "A",
+        "dd24_max": -0.06,
+        "sl_atr": 1.5,
+        "tp_r": 1.0,
+        "max_hold": 12,
+    },
+    "B": {
+        "name": "B",
+        "dd24_max": -0.06,
+        "sl_atr": 2.0,
+        "tp_r": 1.0,
+        "max_hold": 24,
+    },
+    "C": {
+        "name": "C",
+        "dd24_max": -0.03,
+        "sl_atr": 2.0,
+        "tp_r": 1.5,
+        "max_hold": 36,
+    },
+}
+
 TRADE_FIELDS = (
-    "status", "coin", "side", "signal_time", "entry_time", "exit_time",
+    "status", "coin", "side", "variant", "signal_time", "entry_time", "exit_time",
     "limit_px", "entry", "exit", "sl", "tp", "atr",
-    "pump_high", "pump_low", "pump_ratio", "close_off_high", "bar_return",
-    "ta_extreme", "day_ntl_vlm",
+    "up48", "dd24", "ret1h", "ta_extreme", "day_ntl_vlm",
     "size_coins", "notional", "risk_usd",
-    "gross_pnl", "fees", "net_pnl", "r",
-    "exit_reason",
-    "naive_filled", "conservative_filled",
-    "naive_entry_time", "naive_exit_time", "naive_exit_reason", "naive_r",
-    "conservative_entry_time", "conservative_exit_time", "conservative_exit_reason", "conservative_r",
+    "gross_pnl", "fees", "funding_pnl", "net_pnl", "r",
+    "exit_reason", "filled", "funding_ok",
     "hypothetical_entry", "hypothetical_exit", "hypothetical_exit_reason", "hypothetical_r",
     "best_ask", "ask_depth_ntl", "ask_depth_complete", "limit_vs_spread", "l2_snaps",
 )
+
+
+def variant(name=LIVE_VARIANT, **overrides):
+    """Copy of a research variant. Unknown names raise KeyError."""
+    cfg = dict(VARIANTS[name])
+    cfg.update(overrides)
+    cfg["name"] = name
+    return cfg
 
 
 def prepare(candles):
     return paper.index_series(candles, paper.wilder_atr(candles, ATR_PERIOD))
 
 
-def window_extremes(candles, i, window=WINDOW):
-    """Max high and min low of the `window` hourly bars ending at i, or None."""
-    window = int(window)
-    if not candles or i < window - 1 or i >= len(candles):
+def _contiguous(candles, start, end):
+    """candles[start:end] inclusive, or None when an hour is missing."""
+    if start < 0 or end >= len(candles) or start > end:
         return None
-    chunk = candles[i - window + 1:i + 1]
-    if len(chunk) < window:
-        return None
+    chunk = candles[start:end + 1]
     for prev, nxt in zip(chunk, chunk[1:]):
         if nxt["t"] - prev["t"] != paper.HOUR_MS:
             return None
-    hi = max(bar["h"] for bar in chunk)
-    lo = min(bar["l"] for bar in chunk)
-    if hi <= 0 or lo <= 0:
-        return None
-    return hi, lo
+    return chunk
 
 
-def detect(candles, i, atr, window=WINDOW):
-    """Signal dict for candle i, or None. `atr` is ATR(14) on that candle."""
-    if atr is None or atr <= 0:
+def detect(candles, i, atr, cfg=None):
+    """Signal dict for closed bar i, or None. `atr` is ATR(14) on that bar."""
+    cfg = cfg or variant()
+    if atr is None or atr <= 0 or not candles or i < 1 or i >= len(candles):
         return None
-    extremes = window_extremes(candles, i, window)
-    if extremes is None:
-        return None
-    hi, lo = extremes
-    if hi + 1e-12 < PUMP_MIN * lo:
+    up = _contiguous(candles, i - (UP_WINDOW - 1), i)
+    down = _contiguous(candles, i - (DD_WINDOW - 1), i)
+    if not up or not down:
         return None
     bar = candles[i]
-    if bar["o"] <= 0 or bar["c"] <= 0 or hi <= 0:
+    prev = candles[i - 1]
+    if bar["c"] <= 0 or prev["c"] <= 0 or bar["t"] - prev["t"] != paper.HOUR_MS:
         return None
-    off = (hi - bar["c"]) / hi
-    if off + 1e-12 < CLOSE_OFF_MIN or off - 1e-12 > CLOSE_OFF_MAX:
+    min_close = min(c["c"] for c in up)
+    max_high = max(c["h"] for c in down)
+    if min_close <= 0 or max_high <= 0:
         return None
-    ret = bar["c"] / bar["o"] - 1.0
-    if ret - 1e-12 > BAR_DROP:
+    up48 = bar["c"] / min_close - 1.0
+    dd24 = bar["c"] / max_high - 1.0
+    ret1h = bar["c"] / prev["c"] - 1.0
+    if up48 + 1e-12 < UP48_MIN:
         return None
-    ratio = hi / lo
+    if dd24 - 1e-12 > float(cfg["dd24_max"]):
+        return None
+    if ret1h - 1e-12 > RET1H_MAX:
+        return None
     limit = bar["c"] + LIMIT_ATR * float(atr)
     if limit <= 0:
         return None
     return {
         "side": "short",
-        "pump_high": hi,
-        "pump_low": lo,
-        "pump_ratio": ratio,
-        "close_off_high": off,
-        "bar_return": ret,
+        "up48": up48,
+        "dd24": dd24,
+        "ret1h": ret1h,
+        "min_close": min_close,
+        "max_high": max_high,
         "atr": float(atr),
         "limit": limit,
-        "ta_extreme": ratio + 1e-12 >= PUMP_EXTREME,
-        "signal_open": bar["o"],
+        "ta_extreme": up48 + 1e-12 >= UP48_EXTREME,
         "signal_close": bar["c"],
         "signal_t": bar["t"],
     }
 
 
-def naive_hit(high, limit):
-    """True when the bar high trades the sell limit."""
+def traded_through_above(high, limit, extra=TRADE_THROUGH):
+    """True when the high is strictly above limit * (1 + extra)."""
     if high is None or limit is None or limit <= 0:
         return False
-    return high + 1e-12 >= limit
+    return high > limit * (1.0 + float(extra))
 
 
-def conservative_hit(high, limit, extra=CONSERVATIVE_FRAC):
-    """True when the high clears the limit by at least `extra` (0.05%)."""
-    if high is None or limit is None or limit <= 0:
+def traded_through_below(low, limit, extra=TRADE_THROUGH):
+    """True when the low is strictly below limit * (1 - extra)."""
+    if low is None or limit is None or limit <= 0:
         return False
-    return (high - limit) / limit + 1e-12 >= float(extra)
+    return low < limit * (1.0 - float(extra))
 
 
-def planned_levels(entry, atr):
-    """Stop above entry and a target one R under it. R = 1.75 * ATR."""
-    dist = SL_ATR * float(atr)
-    return entry + dist, entry - dist
+def planned_levels(entry, atr, cfg=None):
+    """Stop above entry, and a target `tp_r` times that distance below it."""
+    cfg = cfg or variant()
+    dist = float(cfg["sl_atr"]) * float(atr)
+    return entry + dist, entry - float(cfg["tp_r"]) * dist
 
 
 def size_coins(entry, sl, risk_usd=RISK_USD):
@@ -168,29 +210,47 @@ def size_coins(entry, sl, risk_usd=RISK_USD):
     return float(risk_usd) / dist
 
 
-def settle(entry, exit_px, size, entry_kind, exit_kind, risk_usd=RISK_USD):
-    """Short PnL. Entry and exit kinds are 'maker' or 'taker'."""
+def worse_short(price, slippage=SLIPPAGE):
+    """A taker short fill, pushed against the position by `slippage`."""
+    return price * (1.0 + float(slippage))
+
+
+def settle(entry, exit_px, size, entry_kind, exit_kind, risk_usd=RISK_USD,
+           entry_t=None, exit_t=None, points=None):
+    """Short PnL. `points` is funding (ts, rate) or None when it was not read.
+
+    An empty list is a known history with no prints. Positive funding is
+    received by the short, matching the other paper books.
+    """
     gross = (entry - exit_px) * size
     fees = (
         FEE_RATE[entry_kind] * size * entry
         + FEE_RATE[exit_kind] * size * exit_px
     )
-    net = gross - fees
+    if points is None:
+        fund, ok = 0.0, False
+    else:
+        fund = paper.funding_pnl("short", entry, size, entry_t, exit_t, points)
+        ok = True
+    net = gross - fees + fund
     risk = float(risk_usd) if risk_usd else 0.0
-    r = net / risk if risk else None
     return {
         "gross_pnl": gross,
         "fees": fees,
+        "funding_pnl": fund,
+        "funding_ok": ok,
         "net_pnl": net,
-        "r": r,
+        "r": (net / risk) if risk else None,
     }
 
 
-def resolve_bar(leg, bar, max_hold=MAX_HOLD):
+def resolve_bar(leg, bar):
     """Exit of an open short on `bar`, or None.
 
-    Returns (price, reason, fee kind). Maker legs do not take profit on the
-    fill bar. A bar that reaches both the stop and the target stops out.
+    Returns (price, reason, fee kind). The stop may fire on the entry bar.
+    The maker target may not, and it needs a trade-through. A bar that
+    reaches both exits at the stop. The time exit is the close of the
+    last hold bar.
     """
     if not leg or not bar or leg.get("exit_reason"):
         return None
@@ -198,28 +258,18 @@ def resolve_bar(leg, bar, max_hold=MAX_HOLD):
         return None
     sl = leg["sl"]
     tp = leg["tp"]
+    slip = float(leg.get("slippage") if leg.get("slippage") is not None else SLIPPAGE)
+    extra = float(leg.get("trade_through") if leg.get("trade_through") is not None else TRADE_THROUGH)
     entry_bar = bar["t"] == leg["entry_t"]
-    maker = leg.get("entry_fee") == "maker"
     o, h, l, c = bar["o"], bar["h"], bar["l"], bar["c"]
-
-    def sl_price():
-        return o if o >= sl else sl
-
-    if maker and entry_bar:
-        if o >= sl or h >= sl:
-            return sl_price(), "sl", "taker"
-    else:
-        if o >= sl:
-            return o, "sl", "taker"
-        if o <= tp:
-            return o, "tp", "taker"
-        if h >= sl:
-            return sl, "sl", "taker"
-        if l <= tp:
-            return tp, "tp", "maker"
+    if o >= sl or h >= sl:
+        base = o if o >= sl else sl
+        return worse_short(base, slip), "sl", "taker"
+    if not entry_bar and traded_through_below(l, tp, extra):
+        return tp, "tp", "maker"
     held = int((bar["t"] - leg["entry_t"]) // paper.HOUR_MS) + 1
-    if held >= int(max_hold):
-        return c, "time", "taker"
+    if held >= int(leg.get("max_hold") or variant()["max_hold"]):
+        return worse_short(c, slip), "time", "taker"
     return None
 
 
@@ -325,8 +375,20 @@ def _bar(series, coin, t):
     return candles[i]
 
 
-def _make_leg(entry, atr, entry_t, model, entry_fee, risk_usd=RISK_USD):
-    sl, tp = planned_levels(entry, atr)
+def _rules(cfg):
+    cfg = cfg or variant()
+    return {
+        "max_hold": int(cfg["max_hold"]),
+        "trade_through": TRADE_THROUGH,
+        "slippage": SLIPPAGE,
+        "sl_atr": float(cfg["sl_atr"]),
+        "tp_r": float(cfg["tp_r"]),
+    }
+
+
+def _make_leg(entry, atr, entry_t, model, entry_fee, rules, risk_usd=RISK_USD):
+    cfg = {"sl_atr": rules["sl_atr"], "tp_r": rules["tp_r"]}
+    sl, tp = planned_levels(entry, atr, cfg)
     size = size_coins(entry, sl, risk_usd)
     if size is None or entry <= 0 or sl <= 0 or tp <= 0:
         return None
@@ -339,58 +401,82 @@ def _make_leg(entry, atr, entry_t, model, entry_fee, risk_usd=RISK_USD):
         "size": size,
         "risk_usd": float(risk_usd),
         "entry_fee": entry_fee,
+        "max_hold": rules["max_hold"],
+        "trade_through": rules["trade_through"],
+        "slippage": rules["slippage"],
         "exit": None,
         "exit_t": None,
         "exit_reason": None,
         "exit_fee": None,
         "gross_pnl": None,
         "fees": None,
+        "funding_pnl": None,
+        "funding_ok": None,
         "net_pnl": None,
         "r": None,
     }
 
 
-def _apply_exit(leg, bar, price, reason, fee_kind):
-    acct = settle(leg["entry"], price, leg["size"], leg["entry_fee"], fee_kind, leg["risk_usd"])
+def _funding_points(funding, coin):
+    """Funding rows for one coin.
+
+    None as the whole map means the caller did not load funding: treat it
+    as an empty, known history so tests stay on fees alone. A map that
+    simply lacks the coin means the read failed.
+    """
+    if funding is None:
+        return []
+    if callable(funding):
+        return funding(coin)
+    if isinstance(funding, dict) and coin not in funding:
+        return None
+    return funding.get(coin)
+
+
+def _apply_exit(leg, bar, price, reason, fee_kind, points):
+    exit_t = bar["t"] + paper.HOUR_MS
+    acct = settle(
+        leg["entry"], price, leg["size"], leg["entry_fee"], fee_kind, leg["risk_usd"],
+        entry_t=leg["entry_t"], exit_t=exit_t, points=points,
+    )
     leg["exit"] = price
-    leg["exit_t"] = bar["t"] + paper.HOUR_MS
+    leg["exit_t"] = exit_t
     leg["exit_reason"] = reason
     leg["exit_fee"] = fee_kind
     leg.update(acct)
     return leg
 
 
-def _open_on_bar(sig, bar, model):
-    """Open a maker leg at the limit, or a taker leg at the bar open."""
-    if model == "hypothetical":
-        entry = bar["o"]
+def _open_on_bar(sig, bar, model, points):
+    """Open a maker leg at the limit, or a taker leg at the slipped open."""
+    rules = sig["rules"]
+    if model == "taker":
+        # A short sold at market receives a worse (lower) price.
+        entry = bar["o"] * (1.0 - rules["slippage"])
         fee = "taker"
     else:
         entry = sig["limit"]
         fee = "maker"
-    leg = _make_leg(entry, sig["atr"], bar["t"], model, fee)
+    leg = _make_leg(entry, sig["atr"], bar["t"], model, fee, rules)
     if leg is None:
         return None
     resolved = resolve_bar(leg, bar)
     if resolved:
-        _apply_exit(leg, bar, *resolved)
+        _apply_exit(leg, bar, *resolved, points)
     return leg
 
 
 def _occupies(sig):
     if sig.get("window_open"):
         return True
-    for key in ("naive", "conservative"):
-        leg = sig.get(key)
-        if leg and not leg.get("exit_reason"):
-            return True
-    return False
+    leg = sig.get("position")
+    return bool(leg and not leg.get("exit_reason"))
 
 
 def _done(sig):
     if sig.get("window_open"):
         return False
-    for key in ("naive", "conservative", "shadow"):
+    for key in ("position", "shadow"):
         leg = sig.get(key)
         if leg and not leg.get("exit_reason"):
             return False
@@ -401,46 +487,35 @@ def _csv_flag(value):
     return "1" if value else "0"
 
 
-def _leg_cols(prefix, leg):
-    if not leg:
-        return {
-            f"{prefix}_entry_time": "",
-            f"{prefix}_exit_time": "",
-            f"{prefix}_exit_reason": "",
-            f"{prefix}_r": "",
-        }
-    return {
-        f"{prefix}_entry_time": paper.iso(leg.get("entry_t")),
-        f"{prefix}_exit_time": paper.iso(leg.get("exit_t")),
-        f"{prefix}_exit_reason": leg.get("exit_reason") or "",
-        f"{prefix}_r": paper.csv_num(leg.get("r")),
-    }
+def _blank_row():
+    return {key: "" for key in TRADE_FIELDS}
 
 
 def _row_from(sig, status):
-    naive = sig.get("naive")
-    cons = sig.get("conservative")
+    leg = sig.get("position")
     shadow = sig.get("shadow")
-    primary = naive if status == "closed" else None
-    row = {key: "" for key in TRADE_FIELDS}
+    primary = leg if status == "closed" else None
+    sl, tp = planned_levels(sig["limit"], sig["atr"], {
+        "sl_atr": sig["rules"]["sl_atr"], "tp_r": sig["rules"]["tp_r"],
+    })
+    row = _blank_row()
     row.update({
         "status": status,
         "coin": sig["coin"],
         "side": "short",
+        "variant": sig.get("variant") or LIVE_VARIANT,
         "signal_time": paper.iso(sig.get("signal_t")),
         "entry_time": paper.iso(primary.get("entry_t")) if primary else "",
         "exit_time": paper.iso(primary.get("exit_t")) if primary else "",
         "limit_px": paper.csv_num(sig.get("limit")),
         "entry": paper.csv_num(primary.get("entry")) if primary else "",
         "exit": paper.csv_num(primary.get("exit")) if primary else "",
-        "sl": paper.csv_num(primary.get("sl")) if primary else paper.csv_num(planned_levels(sig["limit"], sig["atr"])[0]),
-        "tp": paper.csv_num(primary.get("tp")) if primary else paper.csv_num(planned_levels(sig["limit"], sig["atr"])[1]),
+        "sl": paper.csv_num(primary.get("sl")) if primary else paper.csv_num(sl),
+        "tp": paper.csv_num(primary.get("tp")) if primary else paper.csv_num(tp),
         "atr": paper.csv_num(sig.get("atr")),
-        "pump_high": paper.csv_num(sig.get("pump_high")),
-        "pump_low": paper.csv_num(sig.get("pump_low")),
-        "pump_ratio": paper.csv_num(sig.get("pump_ratio")),
-        "close_off_high": paper.csv_num(sig.get("close_off_high")),
-        "bar_return": paper.csv_num(sig.get("bar_return")),
+        "up48": paper.csv_num(sig.get("up48")),
+        "dd24": paper.csv_num(sig.get("dd24")),
+        "ret1h": paper.csv_num(sig.get("ret1h")),
         "ta_extreme": _csv_flag(sig.get("ta_extreme")),
         "day_ntl_vlm": paper.csv_num(sig.get("day_ntl_vlm")),
         "size_coins": paper.csv_num(primary.get("size")) if primary else "",
@@ -448,64 +523,55 @@ def _row_from(sig, status):
         "risk_usd": paper.csv_num(primary.get("risk_usd") if primary else RISK_USD),
         "gross_pnl": paper.csv_num(primary.get("gross_pnl")) if primary else "",
         "fees": paper.csv_num(primary.get("fees")) if primary else "",
+        "funding_pnl": paper.csv_num(primary.get("funding_pnl")) if primary and primary.get("funding_ok") else "",
         "net_pnl": paper.csv_num(primary.get("net_pnl")) if primary else "",
         "r": paper.csv_num(primary.get("r")) if primary else "",
         "exit_reason": (primary or {}).get("exit_reason") or ("expired-unfilled" if status == "unfilled" else ""),
-        "naive_filled": _csv_flag(bool(naive)),
-        "conservative_filled": _csv_flag(bool(cons)),
+        "filled": _csv_flag(bool(leg)),
+        "funding_ok": "1" if primary and primary.get("funding_ok") else ("0" if primary else ""),
         "hypothetical_entry": paper.csv_num(shadow.get("entry")) if shadow else "",
         "hypothetical_exit": paper.csv_num(shadow.get("exit")) if shadow else "",
         "hypothetical_exit_reason": (shadow or {}).get("exit_reason") or "",
-        "hypothetical_r": paper.csv_num(shadow.get("r")) if shadow else "",
+        "hypothetical_r": paper.csv_num(shadow.get("r")) if shadow and shadow.get("exit_reason") else "",
         "best_ask": paper.csv_num(sig.get("best_ask")),
         "ask_depth_ntl": paper.csv_num(sig.get("ask_depth_ntl")),
         "ask_depth_complete": "" if sig.get("ask_depth_complete") is None else str(int(sig.get("ask_depth_complete"))),
         "limit_vs_spread": sig.get("limit_vs_spread") or "",
         "l2_snaps": json.dumps(sig.get("l2_snaps") or [], separators=(",", ":"), sort_keys=True),
     })
-    if status == "closed":
-        row.update(_leg_cols("naive", naive))
-        # _leg_cols uses naive_entry_time; primary columns already hold naive.
-        row["naive_entry_time"] = paper.iso(naive.get("entry_t")) if naive else ""
-        row["naive_exit_time"] = paper.iso(naive.get("exit_t")) if naive else ""
-        row["naive_exit_reason"] = (naive or {}).get("exit_reason") or ""
-        row["naive_r"] = paper.csv_num(naive.get("r")) if naive else ""
-    else:
-        row.update(_leg_cols("naive", naive))
-    row.update(_leg_cols("conservative", cons))
     return row
 
 
-def _skipped_row(coin, sig, volume):
-    sl, tp = planned_levels(sig["limit"], sig["atr"])
-    row = {key: "" for key in TRADE_FIELDS}
+def _skipped_row(coin, found, volume, cfg):
+    sl, tp = planned_levels(found["limit"], found["atr"], cfg)
+    row = _blank_row()
     row.update({
         "status": "skipped_cap",
         "coin": coin,
         "side": "short",
-        "signal_time": paper.iso(sig.get("signal_t")),
-        "limit_px": paper.csv_num(sig.get("limit")),
+        "variant": cfg["name"],
+        "signal_time": paper.iso(found.get("signal_t")),
+        "limit_px": paper.csv_num(found.get("limit")),
         "sl": paper.csv_num(sl),
         "tp": paper.csv_num(tp),
-        "atr": paper.csv_num(sig.get("atr")),
-        "pump_high": paper.csv_num(sig.get("pump_high")),
-        "pump_low": paper.csv_num(sig.get("pump_low")),
-        "pump_ratio": paper.csv_num(sig.get("pump_ratio")),
-        "close_off_high": paper.csv_num(sig.get("close_off_high")),
-        "bar_return": paper.csv_num(sig.get("bar_return")),
-        "ta_extreme": _csv_flag(sig.get("ta_extreme")),
+        "atr": paper.csv_num(found.get("atr")),
+        "up48": paper.csv_num(found.get("up48")),
+        "dd24": paper.csv_num(found.get("dd24")),
+        "ret1h": paper.csv_num(found.get("ret1h")),
+        "ta_extreme": _csv_flag(found.get("ta_extreme")),
         "day_ntl_vlm": paper.csv_num(volume),
         "risk_usd": paper.csv_num(RISK_USD),
         "exit_reason": "skipped_cap",
-        "naive_filled": "0",
-        "conservative_filled": "0",
+        "filled": "0",
         "l2_snaps": "[]",
     })
     return row
 
 
 def _event(kind, sig, leg=None, exit_reason=None, r=None):
-    sl, tp = planned_levels(sig["limit"], sig["atr"])
+    sl, tp = planned_levels(sig["limit"], sig["atr"], {
+        "sl_atr": sig["rules"]["sl_atr"], "tp_r": sig["rules"]["tp_r"],
+    })
     if leg:
         sl, tp = leg["sl"], leg["tp"]
     event_id = f"{BOOK}_{kind}:{sig['coin']}:{sig.get('signal_t')}"
@@ -513,10 +579,11 @@ def _event(kind, sig, leg=None, exit_reason=None, r=None):
         event_id += f":{leg.get('model')}:{leg.get('entry_t')}"
     if exit_reason:
         event_id += f":{exit_reason}:{leg.get('exit_t') if leg else sig.get('expires_t')}"
-    body = {
+    return {
         "type": f"{BOOK}_{kind}",
         "paper": True,
         "book": BOOK,
+        "variant": sig.get("variant") or LIVE_VARIANT,
         "coin": sig["coin"],
         "side": "short",
         "side_label": "corto",
@@ -530,8 +597,10 @@ def _event(kind, sig, leg=None, exit_reason=None, r=None):
         "exit_reason": exit_reason,
         "exit": paper.jnum(leg.get("exit")) if leg and leg.get("exit") is not None else None,
         "ta_extreme": bool(sig.get("ta_extreme")),
+        "up48": paper.jnum(sig.get("up48")),
+        "dd24": paper.jnum(sig.get("dd24")),
+        "ret1h": paper.jnum(sig.get("ret1h")),
         "dayNtlVlm": paper.jnum(sig.get("day_ntl_vlm")),
-        "pump_ratio": paper.jnum(sig.get("pump_ratio")),
         "signal_time": paper.iso(sig.get("signal_t")),
         "entry_time": paper.iso(leg.get("entry_t")) if leg else None,
         "exit_time": paper.iso(leg.get("exit_t")) if leg and leg.get("exit_t") else None,
@@ -540,16 +609,18 @@ def _event(kind, sig, leg=None, exit_reason=None, r=None):
         "ask_depth_ntl": sig.get("ask_depth_ntl"),
         "limit_vs_spread": sig.get("limit_vs_spread"),
         "risk_usd": paper.jnum(RISK_USD),
+        "funding_pnl": paper.jnum(leg.get("funding_pnl")) if leg and leg.get("funding_ok") else None,
         "event_id": event_id,
     }
-    return body
 
 
-def _new_signal(coin, found, volume):
-    sl, tp = planned_levels(found["limit"], found["atr"])
+def _new_signal(coin, found, volume, cfg):
+    rules = _rules(cfg)
+    sl, tp = planned_levels(found["limit"], found["atr"], cfg)
     return {
         "coin": coin,
         "side": "short",
+        "variant": cfg["name"],
         "signal_t": found["signal_t"],
         "expires_t": found["signal_t"] + VALID_BARS * paper.HOUR_MS,
         "window_open": True,
@@ -557,15 +628,13 @@ def _new_signal(coin, found, volume):
         "atr": found["atr"],
         "sl": sl,
         "tp": tp,
-        "pump_high": found["pump_high"],
-        "pump_low": found["pump_low"],
-        "pump_ratio": found["pump_ratio"],
-        "close_off_high": found["close_off_high"],
-        "bar_return": found["bar_return"],
+        "up48": found["up48"],
+        "dd24": found["dd24"],
+        "ret1h": found["ret1h"],
         "ta_extreme": bool(found["ta_extreme"]),
         "day_ntl_vlm": volume,
-        "naive": None,
-        "conservative": None,
+        "rules": rules,
+        "position": None,
         "shadow": None,
         "l2_snaps": [],
         "best_bid": None,
@@ -585,49 +654,46 @@ def _hours_after(cursor, end):
         hour += paper.HOUR_MS
 
 
-def _replay_shadow(sig, series):
+def _replay_shadow(sig, series, points):
     """Taker at the next open, walked through the bars already closed."""
     entry_t = sig["signal_t"] + paper.HOUR_MS
     bar = _bar(series, sig["coin"], entry_t)
     if bar is None or bar["o"] <= 0:
         sig["shadow"] = None
         return None
-    leg = _open_on_bar(sig, bar, "hypothetical")
+    leg = _open_on_bar(sig, bar, "taker", points)
     t = entry_t + paper.HOUR_MS
     while leg and not leg.get("exit_reason") and t <= sig["expires_t"]:
         nxt = _bar(series, sig["coin"], t)
         if nxt is not None:
             resolved = resolve_bar(leg, nxt)
             if resolved:
-                _apply_exit(leg, nxt, *resolved)
+                _apply_exit(leg, nxt, *resolved, points)
         t += paper.HOUR_MS
     sig["shadow"] = leg
     return leg
 
 
-def _manage_open_legs(sig, bar, hour, events):
-    """Apply stops, targets and the time exit on a bar after the fill bar."""
-    for key in ("naive", "conservative"):
-        leg = sig.get(key)
-        if not leg or leg.get("exit_reason") or leg["entry_t"] >= hour:
-            continue
+def _manage_open(sig, bar, hour, events, points):
+    """Stops, targets and the time exit on a bar after the fill."""
+    leg = sig.get("position")
+    if leg and not leg.get("exit_reason") and leg["entry_t"] < hour:
         resolved = resolve_bar(leg, bar)
-        if not resolved:
-            continue
-        _apply_exit(leg, bar, *resolved)
-        events.append(_event("exit", sig, leg, exit_reason=leg["exit_reason"]))
+        if resolved:
+            _apply_exit(leg, bar, *resolved, points)
+            events.append(_event("exit", sig, leg, exit_reason=leg["exit_reason"]))
     shadow = sig.get("shadow")
     if shadow and not shadow.get("exit_reason") and shadow["entry_t"] < hour:
         resolved = resolve_bar(shadow, bar)
         if resolved:
-            _apply_exit(shadow, bar, *resolved)
+            _apply_exit(shadow, bar, *resolved, points)
 
 
-def _expire(sig, series, events):
+def _expire(sig, series, events, points):
     sig["window_open"] = False
-    if sig.get("naive"):
+    if sig.get("position"):
         return
-    shadow = _replay_shadow(sig, series)
+    shadow = _replay_shadow(sig, series, points)
     event = _event(
         "exit", sig, None, exit_reason="expired-unfilled",
         r=shadow.get("r") if shadow and shadow.get("exit_reason") else None,
@@ -639,54 +705,62 @@ def _expire(sig, series, events):
     events.append(event)
 
 
-def _catch_up(sig, series, t, events):
-    """Walk hours the signal has not seen yet, including hours a failed read skipped.
+def _try_fill(sig, bar, events, points):
+    if sig.get("position"):
+        return
+    if not traded_through_above(bar["h"], sig["limit"], sig["rules"]["trade_through"]):
+        return
+    leg = _open_on_bar(sig, bar, "maker", points)
+    if leg is None:
+        return
+    sig["position"] = leg
+    events.append(_event("fill", sig, leg))
+    if leg.get("exit_reason"):
+        events.append(_event("exit", sig, leg, exit_reason=leg["exit_reason"]))
 
-    A hole with a later candle is a real gap and is not retried. A hole at the
-    live edge waits for the next run, and the limit is not expired until that
-    hour has been seen or skipped.
-    """
+
+def _catch_up(sig, series, t, events, funding):
+    """Walk hours the signal has not seen yet, including hours a failed read skipped."""
     times = (series.get(sig["coin"]) or {}).get("by_t") or {}
     if not times:
         return
+    points = _funding_points(funding, sig["coin"])
     cursor = sig.get("checked_t", sig["signal_t"])
     for hour in _hours_after(cursor, t):
         if hour not in times:
             if any(ts > hour for ts in times):
                 sig["checked_t"] = hour
                 if sig.get("window_open") and hour >= sig["expires_t"]:
-                    _expire(sig, series, events)
+                    _expire(sig, series, events, points)
                 continue
             return
         bar = _bar(series, sig["coin"], hour)
         sig["checked_t"] = hour
         if bar is not None:
-            _manage_open_legs(sig, bar, hour, events)
+            _manage_open(sig, bar, hour, events, points)
             if sig.get("window_open") and sig["signal_t"] < hour <= sig["expires_t"]:
-                _try_fill(sig, bar, "naive", naive_hit, events)
-                _try_fill(sig, bar, "conservative", conservative_hit, events)
+                _try_fill(sig, bar, events, points)
         if sig.get("window_open") and hour >= sig["expires_t"]:
-            _expire(sig, series, events)
+            _expire(sig, series, events, points)
 
 
-def _try_fill(sig, bar, model, hit, events):
-    if sig.get(model) or not hit(bar["h"], sig["limit"]):
-        return
-    leg = _open_on_bar(sig, bar, model)
-    if leg is None:
-        return
-    sig[model] = leg
-    events.append(_event("fill", sig, leg))
-    if leg.get("exit_reason"):
-        events.append(_event("exit", sig, leg, exit_reason=leg["exit_reason"]))
+def _too_soon(last_ms, t, gap_bars):
+    if last_ms is None:
+        return False
+    return 0 <= int(t) - int(last_ms) < int(gap_bars) * paper.HOUR_MS
 
 
-def _open_signals(book, series, t, meta, active, rows, events):
+def _open_signals(book, series, t, meta, active, rows, events, cfg):
     signals = book["signals"]
+    last_map = book.setdefault("last_signal_t", {})
     occupied = {sig["coin"] for sig in signals if _occupies(sig)}
     slots = len(occupied)
+    gap = int(cfg.get("signal_gap", SIGNAL_GAP))
+    cap = int(cfg.get("max_positions", MAX_POSITIONS))
     for coin in sorted(active):
         if coin in occupied:
+            continue
+        if _too_soon(last_map.get(coin), t, gap):
             continue
         prep = series.get(coin) or {}
         candles = prep.get("candles") or []
@@ -695,14 +769,15 @@ def _open_signals(book, series, t, meta, active, rows, events):
             continue
         atrs = prep.get("atr") or []
         atr = atrs[i] if i < len(atrs) else None
-        found = detect(candles, i, atr)
+        found = detect(candles, i, atr, cfg)
         if not found:
             continue
         volume = _day_volume(meta, coin)
-        if slots >= MAX_POSITIONS:
-            rows.append(_skipped_row(coin, found, volume))
+        last_map[coin] = t
+        if slots >= cap:
+            rows.append(_skipped_row(coin, found, volume, cfg))
             continue
-        sig = _new_signal(coin, found, volume)
+        sig = _new_signal(coin, found, volume, cfg)
         signals.append(sig)
         occupied.add(coin)
         slots += 1
@@ -715,20 +790,26 @@ def _finish(book, rows):
         if not _done(sig):
             keep.append(sig)
             continue
-        status = "closed" if sig.get("naive") else "unfilled"
+        status = "closed" if sig.get("position") else "unfilled"
         rows.append(_row_from(sig, status))
     book["signals"] = keep
 
 
-def step(book, series, *, process_from, latest_closed, meta, active):
+def step(book, series, *, process_from, latest_closed, meta, active, cfg=None, funding=None):
     """Advance the book from `process_from` through `latest_closed`.
 
-    Returns a new book, trade rows and webhook events. The input is not mutated.
+    `cfg` selects the variant (default A). `funding` is a coin to points
+    map, a callable, or None for a known empty history. The input book is
+    not mutated.
     """
     import copy
+    cfg = cfg or variant()
     book = copy.deepcopy(book)
     if not isinstance(book.get("signals"), list):
         book["signals"] = []
+    if not isinstance(book.get("last_signal_t"), dict):
+        book["last_signal_t"] = {}
+    book["variant"] = cfg["name"]
     rows = []
     events = []
     if (
@@ -743,9 +824,9 @@ def step(book, series, *, process_from, latest_closed, meta, active):
     last = int(latest_closed)
     while t <= last:
         for sig in list(book["signals"]):
-            _catch_up(sig, series, t, events)
+            _catch_up(sig, series, t, events, funding)
         _finish(book, rows)
-        _open_signals(book, series, t, meta, active, rows, events)
+        _open_signals(book, series, t, meta, active, rows, events, cfg)
         t += paper.HOUR_MS
     _mirror(book)
     return book, rows, events
@@ -772,27 +853,27 @@ def _mirror(book):
                 "best_ask": sig.get("best_ask"),
                 "ask_depth_ntl": sig.get("ask_depth_ntl"),
                 "limit_vs_spread": sig.get("limit_vs_spread"),
+                "variant": sig.get("variant"),
             })
-        for key in ("naive", "conservative"):
-            leg = sig.get(key)
-            if leg and not leg.get("exit_reason"):
-                positions.append({
-                    "coin": sig["coin"],
-                    "side": "short",
-                    "entry": leg["entry"],
-                    "stop": leg["sl"],
-                    "tp": leg["tp"],
-                    "atr": sig["atr"],
-                    "signal_t": sig["signal_t"],
-                    "entry_t": leg["entry_t"],
-                    "size": leg["size"],
-                    "risk_usd": leg["risk_usd"],
-                    "fill_model": leg["model"],
-                    "ta_extreme": bool(sig.get("ta_extreme")),
-                })
-                break
+        leg = sig.get("position")
+        if leg and not leg.get("exit_reason"):
+            positions.append({
+                "coin": sig["coin"],
+                "side": "short",
+                "entry": leg["entry"],
+                "stop": leg["sl"],
+                "tp": leg["tp"],
+                "atr": sig["atr"],
+                "signal_t": sig["signal_t"],
+                "entry_t": leg["entry_t"],
+                "size": leg["size"],
+                "risk_usd": leg["risk_usd"],
+                "fill_model": leg["model"],
+                "ta_extreme": bool(sig.get("ta_extreme")),
+                "variant": sig.get("variant"),
+            })
         shadow = sig.get("shadow")
-        if shadow and not shadow.get("exit_reason") and not sig.get("naive"):
+        if shadow and not shadow.get("exit_reason") and not leg:
             shadows.append({
                 "coin": sig["coin"],
                 "side": "short",
@@ -839,17 +920,25 @@ def load():
     book = paper.load_book(BOOK)
     if not isinstance(book.get("signals"), list):
         book["signals"] = []
+    if not isinstance(book.get("last_signal_t"), dict):
+        book["last_signal_t"] = {}
+    book["variant"] = LIVE_VARIANT
     book["fee_maker"] = FEE_MAKER
     book["fee_taker"] = FEE_TAKER
+    book["slippage"] = SLIPPAGE
     return book
 
 
 def save(book):
     book = dict(book)
+    book["variant"] = LIVE_VARIANT
     book["fee_maker"] = FEE_MAKER
     book["fee_taker"] = FEE_TAKER
+    book["slippage"] = SLIPPAGE
     if not isinstance(book.get("signals"), list):
         book["signals"] = []
+    if not isinstance(book.get("last_signal_t"), dict):
+        book["last_signal_t"] = {}
     _mirror(book)
     paper.save_book(BOOK, book)
 
@@ -881,19 +970,48 @@ def _fetch_closed(coins, now_ms):
     return closed
 
 
-def run(assets, now_ms, fetch_book=None, closed=None, persist=True):
-    """One hourly pass. Returns events, whether the book changed, and a log line.
+def _live_funding(book, now_ms):
+    """Lazy funding reads. Only a coin that exits pays for the request."""
+    cache = {}
+
+    def funding(coin):
+        if coin in cache:
+            return cache[coin]
+        starts = [int(now_ms) - 48 * paper.HOUR_MS]
+        for sig in book.get("signals") or []:
+            if sig.get("coin") != coin:
+                continue
+            if sig.get("signal_t"):
+                starts.append(int(sig["signal_t"]))
+            leg = sig.get("position") or sig.get("shadow")
+            if leg and leg.get("entry_t"):
+                starts.append(int(leg["entry_t"]))
+        try:
+            cache[coin] = paper.fetch_funding(coin, min(starts), now_ms)
+        except Exception as exc:
+            paper.log(f"c1_maker funding {coin}: {exc}")
+            cache[coin] = None
+        return cache[coin]
+
+    return funding
+
+
+def run(assets, now_ms, fetch_book=None, closed=None, persist=True, cfg=None):
+    """One hourly pass of variant A. Returns events, whether the book changed, and a log line.
 
     Raises only on a programming failure of the pass itself. A missing coin
-    or a single l2Book error is logged and skipped. `persist` False keeps the
-    pass in memory, for tests.
+    or a single l2Book or funding error is logged and skipped. `persist`
+    False keeps the pass in memory, for tests. The live book is always
+    variant A; `cfg` is only for a caller that already knows that.
     """
+    cfg = cfg or variant(LIVE_VARIANT)
     active, meta = main_universe(assets)
     book = load() if persist else {
         "signals": [],
         "positions": [],
         "pending_entries": [],
         "pending_exits": [],
+        "last_signal_t": {},
         "last_processed_open_ms": None,
     }
     needed = set(active)
@@ -905,8 +1023,10 @@ def run(assets, now_ms, fetch_book=None, closed=None, persist=True):
     expected = paper.latest_closed_open(now_ms, paper.HOUR_MS)
     latest = _latest(series, expected) if series else None
     resting = any(sig.get("window_open") for sig in book.get("signals") or [])
-    working = any(_occupies(sig) or (sig.get("shadow") and not sig["shadow"].get("exit_reason"))
-                  for sig in book.get("signals") or [])
+    working = any(
+        _occupies(sig) or (sig.get("shadow") and not sig["shadow"].get("exit_reason"))
+        for sig in book.get("signals") or []
+    )
     if latest is None and not working:
         book["last_run"] = paper.iso(now_ms)
         if persist:
@@ -935,11 +1055,15 @@ def run(assets, now_ms, fetch_book=None, closed=None, persist=True):
             if latest is not None and process_from <= latest:
                 new_bars = int((latest - process_from) / paper.HOUR_MS) + 1
     snapped = record_l2(book, fetch_book, now_ms)
+    funding = _live_funding(book, now_ms) if persist or fetch_book is not None else None
+    # A test pass with persist False and no book feed still settles on fees.
+    if not persist and fetch_book is None:
+        funding = None
     stepped, rows, events = step(
         book, series,
         process_from=process_from if new_bars > 0 else None,
         latest_closed=latest if new_bars > 0 else None,
-        meta=meta, active=active,
+        meta=meta, active=active, cfg=cfg, funding=funding,
     )
     snapped = record_l2(stepped, fetch_book, now_ms) or snapped
     if new_bars > 0 and latest is not None:
@@ -980,7 +1104,7 @@ def _values(rows, key, pred=None):
     return out
 
 
-def _filled(row, key):
+def _filled(row, key="filled"):
     return str(row.get(key) or "").strip() in {"1", "true", "True"}
 
 
@@ -993,75 +1117,62 @@ def profit_factor(values):
     return wins / losses
 
 
-def summarize_rows(rows, open_signals=None):
-    """Trades, fill rates, average R and profit factor.
+def summarize_rows(rows, open_signals=None, days=None):
+    """Signals, fill rate, average R of fills, profit factor, and unfilled taker R.
 
     A limit still inside its three bars is `still_pending` and stays out of
-    the fill rate. Legs that have exited contribute to average R and profit
-    factor, including a naive leg that is waiting on the conservative twin
-    before the row is written. Open fills count in the fill rate.
+    the fill rate. Average R and profit factor use fills that have exited.
     """
     rows = list(rows or [])
     placed = [row for row in rows if row.get("status") in {"closed", "unfilled"}]
     skipped = [row for row in rows if row.get("status") == "skipped_cap"]
-    naive_rs = _values(placed, "naive_r", lambda row: _filled(row, "naive_filled"))
-    cons_rs = _values(placed, "conservative_r", lambda row: _filled(row, "conservative_filled"))
+    filled_rs = _values(placed, "r", lambda row: _filled(row))
     hypo_rs = _values(
         [row for row in placed if row.get("status") == "unfilled"],
         "hypothetical_r",
     )
-    naive_fills = sum(1 for row in placed if _filled(row, "naive_filled"))
-    cons_fills = sum(1 for row in placed if _filled(row, "conservative_filled"))
+    fills = sum(1 for row in placed if _filled(row))
     unfilled = sum(1 for row in placed if row.get("status") == "unfilled")
-    open_naive = 0
+    open_trades = 0
     still_pending = 0
     for sig in open_signals or []:
-        naive = sig.get("naive")
-        cons = sig.get("conservative")
-        if sig.get("window_open") and not naive:
+        leg = sig.get("position")
+        if sig.get("window_open") and not leg:
             still_pending += 1
-        elif not naive:
+        elif not leg:
             unfilled += 1
-            if sig.get("shadow") and sig["shadow"].get("exit_reason") and sig["shadow"].get("r") is not None:
-                hypo_rs.append(float(sig["shadow"]["r"]))
-        if naive:
-            naive_fills += 1
-            if not naive.get("exit_reason"):
-                open_naive += 1
-            elif naive.get("r") is not None:
-                naive_rs.append(float(naive["r"]))
-        if cons:
-            cons_fills += 1
-            if cons.get("exit_reason") and cons.get("r") is not None:
-                cons_rs.append(float(cons["r"]))
-    denom = naive_fills + unfilled
+            shadow = sig.get("shadow")
+            if shadow and shadow.get("exit_reason") and shadow.get("r") is not None:
+                hypo_rs.append(float(shadow["r"]))
+        if leg:
+            fills += 1
+            if not leg.get("exit_reason"):
+                open_trades += 1
+            elif leg.get("r") is not None:
+                filled_rs.append(float(leg["r"]))
+    denom = fills + unfilled
+    signals = len(skipped) + fills + unfilled + still_pending
 
     def avg(values):
         if not values:
             return None
         return sum(values) / len(values)
 
-    def rate(fills):
-        if not denom:
-            return None
-        return fills / denom
-
+    per_day = None
+    if days:
+        per_day = signals / float(days)
     return {
-        "signals": len(skipped) + naive_fills + unfilled + still_pending,
-        "placed": denom + still_pending,
+        "signals": signals,
+        "signals_per_day": per_day,
         "skipped_cap": len(skipped),
-        "trades": len(naive_rs),
-        "naive_fills": naive_fills,
-        "conservative_fills": cons_fills,
+        "trades": len(filled_rs),
+        "fills": fills,
         "unfilled": unfilled,
-        "open_trades": open_naive,
+        "open_trades": open_trades,
         "still_pending": still_pending,
-        "fill_rate_naive": rate(naive_fills),
-        "fill_rate_conservative": rate(cons_fills),
-        "avg_r_naive": avg(naive_rs),
-        "avg_r_conservative": avg(cons_rs),
-        "avg_r_hypothetical_unfilled": avg(hypo_rs),
-        "pf_naive": profit_factor(naive_rs),
-        "pf_conservative": profit_factor(cons_rs),
-        "hypothetical_unfilled": len(hypo_rs),
+        "fill_rate": (fills / denom) if denom else None,
+        "avg_r": avg(filled_rs),
+        "pf": profit_factor(filled_rs),
+        "avg_taker_r_unfilled": avg(hypo_rs),
+        "unfilled_with_r": len(hypo_rs),
     }

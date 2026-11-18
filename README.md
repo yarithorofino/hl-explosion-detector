@@ -253,24 +253,31 @@ Stop inicial: entrada − 2 ATR(14). Trailing: máximo desde la entrada menos 4 
 
 ### c1_maker
 
-Solo cortos, en papel. Universo: todos los perpetuos del dex principal que devuelve `perps_all` (el mismo `metaAndAssetCtxs` del dex principal). No hay filtro de liquidez y no entra HIP-3. Cada hora, sobre la vela de 1h que acaba de cerrar. El volumen de 24h y la profundidad del libro se guardan como referencia; no deciden la señal.
+Solo cortos, en papel. Universo: todos los perpetuos del dex principal que devuelve `perps_all`. No hay filtro de liquidez y no entra HIP-3. Cada hora, sobre velas de 1h ya cerradas. El volumen de 24h y la profundidad del libro se guardan como referencia; no deciden la señal. El libro en directo es la variante **A**. B y C usan el mismo motor con otros parámetros y salen en el repaso.
 
-Hace falta una ventana de 48 velas de 1h seguidas que termine en esa vela. Si falta una hora, no hay señal. El máximo de la ventana es al menos **1,40** veces el mínimo (el precio ha subido un 40% o más). El cierre queda entre un **3%** y un **6%** por debajo de ese máximo, inclusive. La vela cae al menos un **3%** de la apertura al cierre (`close/open − 1 <= −3%`). Si el máximo es al menos el doble del mínimo (un pump del 100% o más), el aviso lleva `ta_extreme: true`. Esa marca no cambia la orden.
+Una vela señala solo si las 48 horas de cierres que terminan en ella, y las 24 horas de máximos que terminan en ella, van seguidas. Si falta una hora, esa ventana no cuenta.
 
-La orden de papel es una venta límite en el cierre más **0,25 ATR(14)**, viva durante las **3** velas siguientes. No se envía a ningún sitio. El fill, si llega, es al precio límite y paga comisión **maker 0,015%**. Se anotan las dos lecturas:
+- `up48 = cierre / mínimo de esos 48 cierres − 1 >= 0,40`
+- `dd24 = cierre / máximo de esos 24 máximos − 1 <= −0,06` en A y B (al menos un 6% por debajo del máximo de 24h, sin tope superior). En C el umbral es **−0,03**.
+- `ret1h = cierre / cierre de la hora anterior − 1 <= −0,03`
 
-- Ingenua: el máximo de una de esas tres velas toca el límite.
-- Conservadora: el máximo supera el límite en al menos un **0,05%** (el sustituto de un tick cuando no hay tamaño de tick por moneda).
+Si `up48 >= 1` (el cierre ha doblado el mínimo de esos 48 cierres), el aviso lleva `ta_extreme: true`. No cambia la orden. Una moneda no vuelve a señalar hasta pasadas **12** velas de su señal anterior, y tampoco mientras tenga un límite vivo o una posición abierta.
 
-Después del fill, el stop es la entrada más **1,75 ATR** (taker, **0,045%**) y el objetivo es la entrada menos **1R** (maker, **0,015%**). 1R es esa misma distancia de 1,75 ATR. A las **48** velas se sale en el cierre, con comisión taker. En la vela del fill solo puede saltar el stop: el mínimo de esa vela puede haberse impreso antes de que el precio subiera hasta el límite. Si una vela posterior toca el stop y el objetivo, sale el stop. Una posición por moneda, como máximo **10**. Cada una arriesga 2,50 USDC. Si el libro ya tiene 10 monedas, la señal se anota `skipped_cap` y no se avisa.
+La orden de papel es una venta límite en el cierre más **0,25 ATR(14)**, viva las **3** velas siguientes. No se envía a ningún sitio. Se llena solo si el máximo de una de esas velas queda **por encima** de `límite × 1,0005` (tiene que atravesarlo; tocarlo no basta). El fill es el precio límite, comisión **maker 0,015%**, sin slippage.
 
-Si las tres velas no tocan el límite, la señal se anota igual, con motivo `expired-unfilled`. El contrafactual entra a taker en la apertura de la vela siguiente (comisión 0,045%) y recorre el mismo stop, objetivo y plazo. Sirve para medir la selección adversa de los límites que no se llegan a negociar. No ocupa una de las 10 plazas.
+1R es la distancia de la entrada al stop. El stop es taker y puede saltar en la vela del fill: se ejecuta en el stop, o en la apertura si la vela abre ya por encima, y ese precio se empeora un **0,01%** (el mismo slippage pequeño del estudio de confluencia). La comisión de esa salida es **0,045%**. El objetivo es una compra límite maker en `entrada − tp_r × 1R`. No puede llenarse en la vela de la entrada, y solo se llena si el mínimo atraviesa el objetivo (`mínimo < objetivo × 0,9995`), al precio del objetivo y con comisión maker 0,015%. Si una vela posterior toca el stop y el objetivo, sale el stop. El funding horario entra en el R con el mismo signo que en los otros libros: si es positivo, el corto lo cobra.
 
-En cada pasada horaria, las órdenes que siguen vivas leen el `l2Book` público de esa moneda: mejor ask, nocional de los asks con precio igual o mejor que el límite, y si el límite cae dentro del spread (`inside`, también si iguala el mejor ask), por detrás del mejor ask (`beyond`) o cruzando el bid (`through`). Si el libro visible se corta antes de salir del límite, la profundidad queda marcada como incompleta. Un fallo de una sola moneda no tira el libro.
+| Variante | dd24 | Stop | Objetivo | Máximo de velas |
+| --- | --- | --- | --- | --- |
+| A (directo) | ≤ −6% | 1,5 ATR | 1R | 12, al cierre |
+| B | ≤ −6% | 2 ATR | 1R | 24, al cierre |
+| C | ≤ −3% | 2 ATR | 1,5R | 36, al cierre |
 
-Si este libro falla entero, el fallo queda en el log y trend4h, squeeze4h y trapped_shorts1h no se tocan.
+La salida por tiempo es el cierre de esa última vela, empeorado el mismo 0,01%, con comisión taker. Una moneda a la vez, como máximo **10**. Cada una arriesga 2,50 USDC. Lo que no cabe se anota `skipped_cap` y no se avisa.
 
-El repaso de los últimos 120 días, sin reconstruir el libro de órdenes histórico, es:
+Si las tres velas no atraviesan el límite, la señal se anota `expired-unfilled`. El contrafactual entra a taker en la apertura siguiente (el mismo 0,01% en contra) y recorre el mismo stop, objetivo, plazo y funding. No ocupa una de las 10 plazas.
+
+En cada pasada, los límites que siguen vivos leen el `l2Book` público: mejor ask, nocional ask a un precio igual o mejor que el límite, y si el límite queda dentro del spread (`inside`), por detrás del mejor ask (`beyond`) o cruzando el bid (`through`). Un fallo de una moneda no tira el libro. Si el libro entero falla, el fallo queda en el log y los otros tres no se tocan.
 
 ```
 python3 c1_replay.py --days 120
@@ -282,9 +289,9 @@ Solo hay POST en una entrada, en una salida (con R) y en el resumen de los lunes
 
 Una entrada lleva `type` `trend4h_entry`, `squeeze4h_entry` o `trapped_shorts1h_entry`, y `paper: true`, moneda, lado, entrada, stop, ATR, EMA100 y EMA200 (null si ese libro no las usa), la hora de la vela y la marca. Una salida es `*_exit` y añade el R y el motivo (`stop`, `reverse` o `time`). `skipped_cap` no se envía.
 
-c1_maker avisa al dejar el límite (`c1_maker_order`), al fill (`c1_maker_fill`) y al salir (`c1_maker_exit`). La salida lleva `exit_reason` `tp`, `sl`, `time` o `expired-unfilled`. El cuerpo lleva `book: "c1_maker"`, `paper: true`, la moneda, `side: "short"`, el límite, la entrada (null hasta el fill), `sl`, `tp`, el R cuando ya se conoce y `ta_extreme`. `skipped_cap` no se envía. En `expired-unfilled` el R es el del contrafactual taker si esa salida ya ha ocurrido dentro de las tres velas; si el contrafactual sigue abierto, el R queda en el CSV cuando cierra y el POST de la caducidad lleva `r` null.
+c1_maker avisa al dejar el límite (`c1_maker_order`), al fill (`c1_maker_fill`) y al salir (`c1_maker_exit`). La salida lleva `exit_reason` `tp`, `sl`, `time` o `expired-unfilled`. El cuerpo lleva `book: "c1_maker"`, `variant: "A"`, `paper: true`, la moneda, `side: "short"`, el límite, la entrada (null hasta el fill), `sl`, `tp`, el R cuando ya se conoce, `up48`, `dd24`, `ret1h` y `ta_extreme`. `skipped_cap` no se envía. En `expired-unfilled` el R es el del contrafactual taker si esa salida ya ha ocurrido dentro de las tres velas; si sigue abierto, el R queda en el CSV cuando cierra y el POST de la caducidad lleva `r` null.
 
-El lunes a las 08:02 el tipo es `trend4h_weekly`. Arriba van las cifras de trend4h (posiciones abiertas, cierres, R acumulada, acierto). `books` repite eso para los cuatro libros, con el recuento de la última semana. En c1_maker ese recuento usa los cierres del fill ingenuo (`status: closed`). Los límites sin fill y el R conservador están en el CSV, no en ese R acumulado.
+El lunes a las 08:02 el tipo es `trend4h_weekly`. Arriba van las cifras de trend4h (posiciones abiertas, cierres, R acumulada, acierto). `books` repite eso para los cuatro libros, con el recuento de la última semana. En c1_maker ese recuento usa los cierres con fill (`status: closed`), funding incluido. Los límites sin fill están en el CSV.
 
 ### Dónde queda el papel
 
