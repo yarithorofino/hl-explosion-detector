@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hourly paper run for trend4h, squeeze4h and trapped_shorts1h.
+"""Hourly paper run for trend4h, squeeze4h, trapped_shorts1h and c1_maker.
 
 Public info API only. No exchange keys and no orders. One run appends the
 market snapshot every hour. The 4h books act when a new 4h candle has
@@ -10,6 +10,7 @@ import os
 import sys
 from datetime import datetime, timezone
 
+import c1_maker
 import detector
 import paper
 import perps_all
@@ -252,6 +253,15 @@ def _weekly_payload(now_ms):
     }
 
 
+def guard_book(name, fn):
+    """Run one book. A failure is logged and does not reach the other books."""
+    try:
+        return fn()
+    except Exception as exc:
+        paper.log(f"{name}: fallo, los otros libros no se tocan: {exc}")
+        return [], False, f"{name}: fallo, libro sin cambios."
+
+
 def _collect_research(assets, snap, now):
     """Order book, listings and liquidation proxy. Never raises into the books."""
     try:
@@ -383,6 +393,14 @@ def run(now=None):
         except Exception as exc:
             paper.log(f"trapped_shorts1h: fallo, el libro no se ha sustituido: {exc}")
             lines.append("- trapped_shorts1h: fallo, libro sin cambios.")
+
+    ev, mutated, line = guard_book(
+        "c1_maker",
+        lambda: c1_maker.run(assets, now_ms, fetch_book=c1_maker.fetch_l2),
+    )
+    events.extend(ev)
+    changed = changed or mutated
+    lines.append(f"- {line}")
 
     runner = paper.load_runner()
     if paper.weekly_due(now, runner.get("last_weekly_sent")):
