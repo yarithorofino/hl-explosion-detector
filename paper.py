@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paper accounting shared by trend4h, squeeze4h and trapped_shorts1h.
+"""Paper accounting shared by trend4h, squeeze4h, trapped_shorts1h and c1_maker.
 
 Public Hyperliquid info only. This module never places an order and never
 reads an exchange key. Webhook URL and auth, when present, come from the
@@ -36,7 +36,16 @@ TRADE_FIELDS = (
 MARKET_FIELDS = (
     "ts", "dex", "coin", "mark", "oi", "oi_usd", "funding", "premium", "dayNtlVlm",
 )
-BOOKS = ("trend4h", "squeeze4h", "trapped_shorts1h")
+BOOKS = ("trend4h", "squeeze4h", "trapped_shorts1h", "c1_maker")
+# c1_maker risks 0.25% of 1,000 USDC and pays maker/taker fees of its own.
+# fee_per_side here is the maker entry fee; the book stores the taker fee too.
+BOOK_PARAMS = {
+    "c1_maker": {
+        "equity_usdc": 1000.0,
+        "risk_pct": 0.0025,
+        "fee_per_side": 0.00015,
+    },
+}
 
 
 def log(msg):
@@ -610,13 +619,23 @@ def simulate(series, signal_fn, book, cfg, *, process_from, latest_closed,
     }
 
 
-def empty_book(strategy):
-    return {
-        "version": 1,
-        "strategy": strategy,
+def book_params(strategy):
+    """Equity, risk and the recorded per-side fee for one book."""
+    return dict(BOOK_PARAMS.get(strategy) or {
         "equity_usdc": EQUITY_USDC,
         "risk_pct": RISK_PCT,
         "fee_per_side": FEE_PER_SIDE,
+    })
+
+
+def empty_book(strategy):
+    params = book_params(strategy)
+    return {
+        "version": 1,
+        "strategy": strategy,
+        "equity_usdc": params["equity_usdc"],
+        "risk_pct": params["risk_pct"],
+        "fee_per_side": params["fee_per_side"],
         "last_processed_open_ms": None,
         "last_run": None,
         "positions": [],
@@ -647,9 +666,7 @@ def load_book(strategy):
 def save_book(strategy, book):
     book = dict(book)
     book["strategy"] = strategy
-    book["equity_usdc"] = EQUITY_USDC
-    book["risk_pct"] = RISK_PCT
-    book["fee_per_side"] = FEE_PER_SIDE
+    book.update(book_params(strategy))
     text = json.dumps(book, ensure_ascii=False, indent=1, sort_keys=True)
     atomic_write(book_dir(strategy) / "open.json", text + "\n")
 
@@ -662,7 +679,9 @@ def _dedupe_key(row):
     )
 
 
-def write_trades(strategy, rows):
+def write_trades(strategy, rows, fieldnames=None):
+    """Append rows. `fieldnames` defaults to the shared book columns."""
+    fieldnames = tuple(fieldnames or TRADE_FIELDS)
     path = book_dir(strategy) / "trades.csv"
     existing = []
     if path.exists():
@@ -676,10 +695,10 @@ def write_trades(strategy, rows):
         existing.append(row)
         seen.add(key)
     buf = io.StringIO()
-    writer = csv.DictWriter(buf, fieldnames=TRADE_FIELDS, lineterminator="\n", extrasaction="ignore")
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, lineterminator="\n", extrasaction="ignore")
     writer.writeheader()
     for row in existing:
-        writer.writerow({k: row.get(k, "") for k in TRADE_FIELDS})
+        writer.writerow({k: row.get(k, "") for k in fieldnames})
     atomic_write(path, buf.getvalue())
     return path
 

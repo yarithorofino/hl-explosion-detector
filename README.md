@@ -1,6 +1,6 @@
 Detector apagado el 13 nov 2026 por decisión del propietario; el repo se conserva como base para un futuro servidor.
 
-El paper (trend4h, squeeze4h y trapped_shorts1h) es otro programa en el mismo repo. No compra ni vende. El horario está en `.github/workflows/trend4h.yml`.
+El paper (trend4h, squeeze4h, trapped_shorts1h y c1_maker) es otro programa en el mismo repo. No compra ni vende. El horario está en `.github/workflows/trend4h.yml`.
 
 # Detector de explosiones (Hyperliquid)
 
@@ -185,11 +185,11 @@ En un repositorio público GitHub apaga los horarios tras 60 días sin actividad
 - No hay ejecuciones → el pull request no está en `main`, o el horario se apagó.
 - Muchas filas `sin_delta` al principio → la cinta todavía no ha cubierto una hora. No se envían.
 
-## Paper: tendencia, squeeze y trapped shorts
+## Paper: tendencia, squeeze, trapped shorts y c1
 
-Tres libros de papel, separados. Cada uno arriesga el **0,25%** de **10.000 USDC** de papel por operación (25 USDC hasta el stop inicial). La comisión es **0,07%** por lado. El funding horario se suma aproximadamente, sobre el nocional de la entrada: si el funding es positivo, el largo lo paga y el corto lo cobra. El R es el resultado neto dividido por esos 25 USDC. No hay claves de exchange y no se envía ninguna orden. La API que se usa es la info pública.
+Cuatro libros de papel, separados. trend4h, squeeze4h y trapped_shorts1h arriesgan el **0,25%** de **10.000 USDC** de papel por operación (25 USDC hasta el stop inicial). La comisión de esos tres es **0,07%** por lado. c1_maker arriesga el **0,25%** de **1.000 USDC** (2,50 USDC) y usa las comisiones de abajo. El funding horario se suma aproximadamente en los tres primeros, sobre el nocional de la entrada: si el funding es positivo, el largo lo paga y el corto lo cobra. El R de esos tres es el resultado neto dividido por esos 25 USDC. c1_maker no suma funding: su R sale solo del precio y de las comisiones maker y taker. No hay claves de exchange y no se envía ninguna orden. La API que se usa es la info pública.
 
-Los tres comparten el workflow **Paper 4h** (`cron: 2 * * * *`, a las :02 UTC) y la rama `detector-state`. Cada hora se añade una fila por perp a `data/market_log/AAAA-MM-DD.csv` (moneda, mark, OI en contratos, OI en dólares, funding, premium, volumen de 24h, dex). Se guardan 120 días. Esas columnas no cambian: trapped_shorts1h sigue leyendo el OI en contratos de ese fichero. La lógica de 4h solo corre cuando hay una vela de 4h recién cerrada (cierra a las 0, 4, 8, 12, 16 y 20 UTC). Si el job llega tarde, procesa la vela que ya esté cerrada; no se la salta por no ser exactamente las :02.
+Los cuatro comparten el workflow **Paper 4h** (`cron: 2 * * * *`, a las :02 UTC) y la rama `detector-state`. Cada hora se añade una fila por perp a `data/market_log/AAAA-MM-DD.csv` (moneda, mark, OI en contratos, OI en dólares, funding, premium, volumen de 24h, dex). Se guardan 120 días. Esas columnas no cambian: trapped_shorts1h sigue leyendo el OI en contratos de ese fichero. La lógica de 4h solo corre cuando hay una vela de 4h recién cerrada (cierra a las 0, 4, 8, 12, 16 y 20 UTC). Si el job llega tarde, procesa la vela que ya esté cerrada; no se la salta por no ser exactamente las :02.
 
 ### Registro para investigación
 
@@ -251,13 +251,40 @@ El interés abierto sale solo de `data/market_log` (contratos, no dólares). Has
 
 Stop inicial: entrada − 2 ATR(14). Trailing: máximo desde la entrada menos 4 ATR, y solo sube. A las 120 velas se sale. Máximo 5 posiciones, una por moneda.
 
+### c1_maker
+
+Solo cortos, en papel. Universo: todos los perpetuos del dex principal que devuelve `perps_all` (el mismo `metaAndAssetCtxs` del dex principal). No hay filtro de liquidez y no entra HIP-3. Cada hora, sobre la vela de 1h que acaba de cerrar. El volumen de 24h y la profundidad del libro se guardan como referencia; no deciden la señal.
+
+Hace falta una ventana de 48 velas de 1h seguidas que termine en esa vela. Si falta una hora, no hay señal. El máximo de la ventana es al menos **1,40** veces el mínimo (el precio ha subido un 40% o más). El cierre queda entre un **3%** y un **6%** por debajo de ese máximo, inclusive. La vela cae al menos un **3%** de la apertura al cierre (`close/open − 1 <= −3%`). Si el máximo es al menos el doble del mínimo (un pump del 100% o más), el aviso lleva `ta_extreme: true`. Esa marca no cambia la orden.
+
+La orden de papel es una venta límite en el cierre más **0,25 ATR(14)**, viva durante las **3** velas siguientes. No se envía a ningún sitio. El fill, si llega, es al precio límite y paga comisión **maker 0,015%**. Se anotan las dos lecturas:
+
+- Ingenua: el máximo de una de esas tres velas toca el límite.
+- Conservadora: el máximo supera el límite en al menos un **0,05%** (el sustituto de un tick cuando no hay tamaño de tick por moneda).
+
+Después del fill, el stop es la entrada más **1,75 ATR** (taker, **0,045%**) y el objetivo es la entrada menos **1R** (maker, **0,015%**). 1R es esa misma distancia de 1,75 ATR. A las **48** velas se sale en el cierre, con comisión taker. En la vela del fill solo puede saltar el stop: el mínimo de esa vela puede haberse impreso antes de que el precio subiera hasta el límite. Si una vela posterior toca el stop y el objetivo, sale el stop. Una posición por moneda, como máximo **10**. Cada una arriesga 2,50 USDC. Si el libro ya tiene 10 monedas, la señal se anota `skipped_cap` y no se avisa.
+
+Si las tres velas no tocan el límite, la señal se anota igual, con motivo `expired-unfilled`. El contrafactual entra a taker en la apertura de la vela siguiente (comisión 0,045%) y recorre el mismo stop, objetivo y plazo. Sirve para medir la selección adversa de los límites que no se llegan a negociar. No ocupa una de las 10 plazas.
+
+En cada pasada horaria, las órdenes que siguen vivas leen el `l2Book` público de esa moneda: mejor ask, nocional de los asks con precio igual o mejor que el límite, y si el límite cae dentro del spread (`inside`, también si iguala el mejor ask), por detrás del mejor ask (`beyond`) o cruzando el bid (`through`). Si el libro visible se corta antes de salir del límite, la profundidad queda marcada como incompleta. Un fallo de una sola moneda no tira el libro.
+
+Si este libro falla entero, el fallo queda en el log y trend4h, squeeze4h y trapped_shorts1h no se tocan.
+
+El repaso de los últimos 120 días, sin reconstruir el libro de órdenes histórico, es:
+
+```
+python3 c1_replay.py --days 120
+```
+
 ### Avisos
 
-Solo hay POST en una entrada, en una salida (con R) y en el resumen de los lunes a las 08:02 UTC. El webhook es el mismo de antes (`EXPLOSION_WEBHOOK_URL` y `EXPLOSION_WEBHOOK_AUTH`). Si faltan, la pasada sigue y anota `dry-run`. El cuerpo es una lista, como el detector.
+Solo hay POST en una entrada, en una salida (con R) y en el resumen de los lunes a las 08:02 UTC. El webhook es el mismo de antes (`EXPLOSION_WEBHOOK_URL` y `EXPLOSION_WEBHOOK_AUTH`). Si faltan, la pasada sigue y anota `dry-run`. El cuerpo es una lista, como el detector. La dirección y el token no se escriben en el registro.
 
 Una entrada lleva `type` `trend4h_entry`, `squeeze4h_entry` o `trapped_shorts1h_entry`, y `paper: true`, moneda, lado, entrada, stop, ATR, EMA100 y EMA200 (null si ese libro no las usa), la hora de la vela y la marca. Una salida es `*_exit` y añade el R y el motivo (`stop`, `reverse` o `time`). `skipped_cap` no se envía.
 
-El lunes a las 08:02 el tipo es `trend4h_weekly`. Arriba van las cifras de trend4h (posiciones abiertas, cierres, R acumulada, acierto). `books` repite eso para los tres libros, con el recuento de la última semana.
+c1_maker avisa al dejar el límite (`c1_maker_order`), al fill (`c1_maker_fill`) y al salir (`c1_maker_exit`). La salida lleva `exit_reason` `tp`, `sl`, `time` o `expired-unfilled`. El cuerpo lleva `book: "c1_maker"`, `paper: true`, la moneda, `side: "short"`, el límite, la entrada (null hasta el fill), `sl`, `tp`, el R cuando ya se conoce y `ta_extreme`. `skipped_cap` no se envía. En `expired-unfilled` el R es el del contrafactual taker si esa salida ya ha ocurrido dentro de las tres velas; si el contrafactual sigue abierto, el R queda en el CSV cuando cierra y el POST de la caducidad lleva `r` null.
+
+El lunes a las 08:02 el tipo es `trend4h_weekly`. Arriba van las cifras de trend4h (posiciones abiertas, cierres, R acumulada, acierto). `books` repite eso para los cuatro libros, con el recuento de la última semana. En c1_maker ese recuento usa los cierres del fill ingenuo (`status: closed`). Los límites sin fill y el R conservador están en el CSV, no en ese R acumulado.
 
 ### Dónde queda el papel
 
@@ -266,6 +293,7 @@ En la rama **`detector-state`**, junto a la memoria del detector:
 - `data/trend4h/open.json` y `data/trend4h/trades.csv`
 - `data/squeeze4h/open.json` y `data/squeeze4h/trades.csv`
 - `data/trapped_shorts1h/open.json` y `data/trapped_shorts1h/trades.csv`
+- `data/c1_maker/open.json` y `data/c1_maker/trades.csv`
 - `data/paper/runner.json` — el lunes ya enviado
 - `data/market_log/AAAA-MM-DD.csv` — OI horario; las columnas no cambian
 - `data/orderbook_log/AAAA-MM-DD.csv` — profundidad y spread

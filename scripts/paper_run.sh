@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One paper pass: trend4h, squeeze4h and trapped_shorts1h.
+# One paper pass: trend4h, squeeze4h, trapped_shorts1h and c1_maker.
 # Secrets stay in the environment and are never printed.
 set -euo pipefail
 

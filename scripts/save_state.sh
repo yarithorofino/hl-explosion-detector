@@ -93,7 +93,7 @@ def check_book(name):
     if trades.exists():
         abort_if_secret(trades.read_text(encoding="utf-8", errors="replace"), f"{name} trades")
 
-for book_name in ("trend4h", "squeeze4h", "trapped_shorts1h"):
+for book_name in ("trend4h", "squeeze4h", "trapped_shorts1h", "c1_maker"):
     check_book(book_name)
 runner = Path("data/paper/runner.json")
 if runner.exists():
@@ -267,6 +267,7 @@ add_book() {
 add_book trend4h
 add_book squeeze4h
 add_book trapped_shorts1h
+add_book c1_maker
 
 if [[ -s data/paper/runner.json ]]; then
   add_blob "data/paper/runner.json" "data/paper/runner.json"
@@ -308,6 +309,8 @@ No edites estos ficheros: el siguiente ciclo los sustituye.
   Libro de paper del squeeze 4h.
 - data/trapped_shorts1h/open.json y data/trapped_shorts1h/trades.csv
   Libro de paper de trapped shorts 1h.
+- data/c1_maker/open.json y data/c1_maker/trades.csv
+  Libro de paper del pump-fade corto con límite maker (c1_maker). No hay órdenes reales.
 - data/paper/runner.json
   Fecha del último resumen semanal.
 - data/market_log/AAAA-MM-DD.csv
@@ -337,6 +340,7 @@ while IFS= read -r f; do
     data/trend4h/open.json|data/trend4h/trades.csv) ;;
     data/squeeze4h/open.json|data/squeeze4h/trades.csv) ;;
     data/trapped_shorts1h/open.json|data/trapped_shorts1h/trades.csv) ;;
+    data/c1_maker/open.json|data/c1_maker/trades.csv) ;;
     data/paper/runner.json) ;;
     data/market_log/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;
     data/orderbook_log/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].csv) ;;

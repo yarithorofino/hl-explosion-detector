@@ -79,6 +79,8 @@ for rel in listing.stdout.splitlines():
         "data/squeeze4h/trades.csv",
         "data/trapped_shorts1h/open.json",
         "data/trapped_shorts1h/trades.csv",
+        "data/c1_maker/open.json",
+        "data/c1_maker/trades.csv",
         "data/paper/runner.json",
         "data/listings_log.csv",
         "data/listings_snapshot.json",
