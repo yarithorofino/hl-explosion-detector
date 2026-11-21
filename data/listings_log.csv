@@ -1,0 +1,7 @@
+ts,dex,coin,event,max_leverage,prev_max_leverage
+2026-11-17T15:54:11Z,io,io:INTC,listing,15,
+2026-11-18T15:57:09Z,io,io:META,listing,25,
+2026-11-19T03:55:04Z,xyz,xyz:PANW,listing,10,
+2026-11-19T21:48:58Z,xyz,xyz:SNDK,delisting,,10
+2026-11-20T02:08:34Z,xyz,xyz:SNDK,listing,10,
+2026-11-20T15:55:18Z,io,io:MU,listing,15,

@@ -1,0 +1,1775 @@
+{
+ "updated_at": "2026-11-21T20:39:07Z",
+ "coins": [
+  {
+   "dex": "io",
+   "coin": "io:AAPL",
+   "max_leverage": 25
+  },
+  {
+   "dex": "io",
+   "coin": "io:ANTH",
+   "max_leverage": 15
+  },
+  {
+   "dex": "io",
+   "coin": "io:CRCL",
+   "max_leverage": 15
+  },
+  {
+   "dex": "io",
+   "coin": "io:DRAM",
+   "max_leverage": 25
+  },
+  {
+   "dex": "io",
+   "coin": "io:EWY",
+   "max_leverage": 25
+  },
+  {
+   "dex": "io",
+   "coin": "io:GPRO",
+   "max_leverage": 5
+  },
+  {
+   "dex": "io",
+   "coin": "io:INTC",
+   "max_leverage": 15
+  },
+  {
+   "dex": "io",
+   "coin": "io:IONQ",
+   "max_leverage": 10
+  },
+  {
+   "dex": "io",
+   "coin": "io:META",
+   "max_leverage": 25
+  },
+  {
+   "dex": "io",
+   "coin": "io:MU",
+   "max_leverage": 15
+  },
+  {
+   "dex": "io",
+   "coin": "io:NBIS",
+   "max_leverage": 15
+  },
+  {
+   "dex": "io",
+   "coin": "io:NVDA",
+   "max_leverage": 25
+  },
+  {
+   "dex": "io",
+   "coin": "io:OAI",
+   "max_leverage": 6
+  },
+  {
+   "dex": "io",
+   "coin": "io:PRL",
+   "max_leverage": 3
+  },
+  {
+   "dex": "io",
+   "coin": "io:SKHX",
+   "max_leverage": 15
+  },
+  {
+   "dex": "io",
+   "coin": "io:SNDK",
+   "max_leverage": 15
+  },
+  {
+   "dex": "io",
+   "coin": "io:TCNT",
+   "max_leverage": 10
+  },
+  {
+   "dex": "io",
+   "coin": "io:XIAOMI",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "0G",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "2Z",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "AAVE",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "ACE",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "ADA",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "AERO",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "AIXBT",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "ALGO",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "ALT",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "ANIME",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "APE",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "APEX",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "APT",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "AR",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "ARB",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "ASTER",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "ATOM",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "AVAX",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "AVNT",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "AXS",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "AZTEC",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "BABY",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "BANANA",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "BCH",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "BERA",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "BIGTIME",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "BIO",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "BLUR",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "BNB",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "BOME",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "BRETT",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "BSV",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "BTC",
+   "max_leverage": 40
+  },
+  {
+   "dex": "main",
+   "coin": "CAKE",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "CASHCAT",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "CC",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "CELO",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "CFX",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "CHIP",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "COMP",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "CRV",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "DASH",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "DOGE",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "DOT",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "DYDX",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "DYM",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "EIGEN",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "ENA",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "ENS",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "ETC",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "ETH",
+   "max_leverage": 25
+  },
+  {
+   "dex": "main",
+   "coin": "ETHFI",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "FARTCOIN",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "FET",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "FIL",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "FOGO",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "GALA",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "GAS",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "GMT",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "GMX",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "GOAT",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "GRAM",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "GRASS",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "GRIFFAIN",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "HBAR",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "HEMI",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "HMSTR",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "HYPE",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "HYPER",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "ICP",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "IMX",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "INIT",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "INJ",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "IO",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "IOTA",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "JTO",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "JUP",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "KAITO",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "KAS",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "LAYER",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "LDO",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "LINEA",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "LINK",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "LIT",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "LTC",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "MANTA",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "ME",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "MEGA",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "MELANIA",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "MEME",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "MERL",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "MET",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "MINA",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "MNT",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "MON",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "MOODENG",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "MORPHO",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "MOVE",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "NEAR",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "NEO",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "NIL",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "NOT",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "NXPC",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "ONDO",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "OP",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "ORDI",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "PAXG",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "PENDLE",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "PENGU",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "PEOPLE",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "PNUT",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "POL",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "POLYX",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "PONS",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "POPCAT",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "PROVE",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "PUMP",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "PURR",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "PYTH",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "RENDER",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "RESOLV",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "REZ",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "RSR",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "RUNE",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "S",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "SAGA",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "SAND",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "SEI",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "SKR",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "SKY",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "SNX",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "SOL",
+   "max_leverage": 20
+  },
+  {
+   "dex": "main",
+   "coin": "SOPH",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "SPX",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "STABLE",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "STBL",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "STRK",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "STX",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "SUI",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "SUPER",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "SUSHI",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "SYRUP",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "TAO",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "TIA",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "TNSR",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "TRB",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "TRUMP",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "TRX",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "TURBO",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "UMA",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "UNI",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "USELESS",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "USUAL",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "VIRTUAL",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "VVV",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "W",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "WCT",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "WIF",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "WLD",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "WLFI",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "XAI",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "XLM",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "XMR",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "XPL",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "XRP",
+   "max_leverage": 20
+  },
+  {
+   "dex": "main",
+   "coin": "XTEN",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "YGG",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "ZEC",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "ZEN",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "ZETA",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "ZK",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "ZORA",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "ZRO",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "kBONK",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "kFLOKI",
+   "max_leverage": 5
+  },
+  {
+   "dex": "main",
+   "coin": "kLUNC",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "kNEIRO",
+   "max_leverage": 3
+  },
+  {
+   "dex": "main",
+   "coin": "kPEPE",
+   "max_leverage": 10
+  },
+  {
+   "dex": "main",
+   "coin": "kSHIB",
+   "max_leverage": 10
+  },
+  {
+   "dex": "mkts",
+   "coin": "mkts:BVIV",
+   "max_leverage": 5
+  },
+  {
+   "dex": "para",
+   "coin": "para:10Y",
+   "max_leverage": 20
+  },
+  {
+   "dex": "para",
+   "coin": "para:2Y",
+   "max_leverage": 20
+  },
+  {
+   "dex": "para",
+   "coin": "para:30Y",
+   "max_leverage": 20
+  },
+  {
+   "dex": "para",
+   "coin": "para:AAOI",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:ANSEM",
+   "max_leverage": 3
+  },
+  {
+   "dex": "para",
+   "coin": "para:ANTH",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:AVGO",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:BTCD",
+   "max_leverage": 20
+  },
+  {
+   "dex": "para",
+   "coin": "para:CIEN",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:CIFR",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:COHR",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:CRDO",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:CRWD",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:DRV",
+   "max_leverage": 5
+  },
+  {
+   "dex": "para",
+   "coin": "para:GDX",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:GLW",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:IGV",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:IREN",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:LRCX",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:MELI",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:NET",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:OTHERS",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:RDDT",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:SMCI",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:SMH",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:SOFI",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:STX",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:TER",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:TOTAL2",
+   "max_leverage": 20
+  },
+  {
+   "dex": "para",
+   "coin": "para:TREAD",
+   "max_leverage": 5
+  },
+  {
+   "dex": "para",
+   "coin": "para:TTWO",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:UNITREE",
+   "max_leverage": 10
+  },
+  {
+   "dex": "para",
+   "coin": "para:VST",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:AAOI",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:AAPL",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:AMAT",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:AMD",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:AMZN",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:ANT",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:ARM",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:ASML",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:AVGO",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:BABA",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:BB",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:BE",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:BIRD",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:BMNR",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:BOT",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:BRENTOIL",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:BX",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:CAMBRICON",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:CBRS",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:CL",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:COIN",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:COPPER",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:COST",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:CRCL",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:CRWD",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:CRWV",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:CVX",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:CXMT",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:DELL",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:DKNG",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:DRAM",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:EBAY",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:EUR",
+   "max_leverage": 50
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:EWJ",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:EWT",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:EWY",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:EWZ",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:GBP",
+   "max_leverage": 50
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:GEV",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:GIGADEV",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:GLW",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:GME",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:GOLD",
+   "max_leverage": 25
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:GOOGL",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:HIMS",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:HO",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:HOOD",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:HYUNDAI",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:IBM",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:ICE",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:INTC",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:IREN",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:JIO",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:JP225",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:JPY",
+   "max_leverage": 50
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:KIOXIA",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:KORU",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:KR200",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:KSTR",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:LITE",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:LLY",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:LRCX",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:LYTE",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:MAGS",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:META",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:MINIMAX",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:MRNA",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:MRVL",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:MSFT",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:MSTR",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:MU",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:MUU",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:NATGAS",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:NBIS",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:NCLD",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:NET",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:NFLX",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:NIFTY",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:NOK",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:NOW",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:NVDA",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:ORCL",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:OURA",
+   "max_leverage": 5
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:PALLADIUM",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:PANW",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:PLATINUM",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:PLTR",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:PURRDAT",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:QCOM",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:QNT",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:RDDT",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:RELIANCE",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:RIVN",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:RKLB",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:SHAZ",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:SHEIN",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:SILVER",
+   "max_leverage": 25
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:SKHX",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:SKHY",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:SMH",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:SMSN",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:SNDK",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:SNXX",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:SOFTBANK",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:SOXL",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:SP500",
+   "max_leverage": 50
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:SPCX",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:STRC",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:TLT",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:TSLA",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:TSM",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:TTWO",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:TWST",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:UMC",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:UNITREE",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:URNM",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:USAR",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:WDC",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:XBI",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:XLE",
+   "max_leverage": 20
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:XYZ100",
+   "max_leverage": 30
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:ZHIPU",
+   "max_leverage": 10
+  },
+  {
+   "dex": "xyz",
+   "coin": "xyz:ZM",
+   "max_leverage": 10
+  }
+ ]
+}

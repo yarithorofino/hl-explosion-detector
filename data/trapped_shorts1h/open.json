@@ -1,0 +1,12 @@
+{
+ "equity_usdc": 10000.0,
+ "fee_per_side": 0.0007,
+ "last_processed_open_ms": 1795287600000,
+ "last_run": "2026-11-21T20:39:07Z",
+ "pending_entries": [],
+ "pending_exits": [],
+ "positions": [],
+ "risk_pct": 0.0025,
+ "strategy": "trapped_shorts1h",
+ "version": 1
+}
