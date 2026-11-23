@@ -285,13 +285,13 @@ python3 c1_replay.py --days 120
 
 ### Avisos
 
-Solo hay POST en una entrada, en una salida (con R) y en el resumen de los lunes a las 08:02 UTC. El webhook es el mismo de antes (`EXPLOSION_WEBHOOK_URL` y `EXPLOSION_WEBHOOK_AUTH`). Si faltan, la pasada sigue y anota `dry-run`. El cuerpo es una lista, como el detector. La dirección y el token no se escriben en el registro.
+Solo hay POST en una entrada, en una salida (con R) y en el resumen semanal. El webhook es el mismo de antes (`EXPLOSION_WEBHOOK_URL` y `EXPLOSION_WEBHOOK_AUTH`). Si faltan, la pasada sigue y anota `dry-run`. El cuerpo es una lista, como el detector. La dirección y el token no se escriben en el registro.
 
 Una entrada lleva `type` `trend4h_entry`, `squeeze4h_entry` o `trapped_shorts1h_entry`, y `paper: true`, moneda, lado, entrada, stop, ATR, EMA100 y EMA200 (null si ese libro no las usa), la hora de la vela y la marca. Una salida es `*_exit` y añade el R y el motivo (`stop`, `reverse` o `time`). `skipped_cap` no se envía.
 
 c1_maker avisa al dejar el límite (`c1_maker_order`), al fill (`c1_maker_fill`) y al salir (`c1_maker_exit`). La salida lleva `exit_reason` `tp`, `sl`, `time` o `expired-unfilled`. El cuerpo lleva `book: "c1_maker"`, `variant: "A"`, `paper: true`, la moneda, `side: "short"`, el límite, la entrada (null hasta el fill), `sl`, `tp`, el R cuando ya se conoce, `up48`, `dd24`, `ret1h` y `ta_extreme`. `skipped_cap` no se envía. En `expired-unfilled` el R es el del contrafactual taker si esa salida ya ha ocurrido dentro de las tres velas; si sigue abierto, el R queda en el CSV cuando cierra y el POST de la caducidad lleva `r` null.
 
-El lunes a las 08:02 el tipo es `trend4h_weekly`. Arriba van las cifras de trend4h (posiciones abiertas, cierres, R acumulada, acierto). `books` repite eso para los cuatro libros, con el recuento de la última semana. En c1_maker ese recuento usa los cierres con fill (`status: closed`), funding incluido. Los límites sin fill están en el CSV.
+El resumen semanal lleva `type` `trend4h_weekly`. Sale en la primera pasada a partir del lunes a las 08:00 UTC, una vez por semana ISO. Si esa hora no corre (el cron horario puede caer en 07:29 o en 09:21) o el POST no responde 2xx, se reintenta en la siguiente pasada. Un fallo de este POST no toca los libros. Arriba van las cifras de trend4h (posiciones abiertas, cierres, R acumulada, acierto). `books` repite eso para los cuatro libros, con el recuento de la última semana. En c1_maker ese recuento usa los cierres con fill (`status: closed`), funding incluido. Los límites sin fill están en el CSV.
 
 ### Dónde queda el papel
 
@@ -301,7 +301,7 @@ En la rama **`detector-state`**, junto a la memoria del detector:
 - `data/squeeze4h/open.json` y `data/squeeze4h/trades.csv`
 - `data/trapped_shorts1h/open.json` y `data/trapped_shorts1h/trades.csv`
 - `data/c1_maker/open.json` y `data/c1_maker/trades.csv`
-- `data/paper/runner.json` — el lunes ya enviado
+- `data/paper/runner.json` — semana ISO ya enviada (`last_weekly_sent`, por ejemplo `2026-W47`), solo tras un POST 2xx
 - `data/market_log/AAAA-MM-DD.csv` — OI horario; las columnas no cambian
 - `data/orderbook_log/AAAA-MM-DD.csv` — profundidad y spread
 - `data/listings_log.csv` y `data/listings_snapshot.json` — altas, bajas y apalancamiento
