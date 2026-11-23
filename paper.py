@@ -772,11 +772,32 @@ def summarize_book(rows, positions, now_ms):
     }
 
 
+def as_utc(now):
+    """Naive timestamps are UTC. Aware ones are converted."""
+    if now.tzinfo is None:
+        return now.replace(tzinfo=timezone.utc)
+    return now.astimezone(timezone.utc)
+
+
+def iso_week_id(now):
+    """ISO week label, such as 2026-W47. The week-year can differ from the calendar year."""
+    year, week, _weekday = as_utc(now).isocalendar()
+    return f"{year}-W{week:02d}"
+
+
 def weekly_due(now, last_sent):
-    """Monday 08:00-08:59 UTC, once per calendar date."""
-    if now.weekday() != 0 or now.hour != 8:
+    """True on the first run at or after Monday 08:00 UTC of an unsent ISO week.
+
+    A run at 07:29 UTC stays quiet. 09:21 UTC the same Monday is due, and so
+    is Tuesday when Monday never ran. `last_sent` is the ISO week id, not a date.
+    """
+    now = as_utc(now)
+    monday_open = (now - timedelta(days=now.weekday())).replace(
+        hour=8, minute=0, second=0, microsecond=0,
+    )
+    if now < monday_open:
         return False
-    return last_sent != now.date().isoformat()
+    return last_sent != iso_week_id(now)
 
 
 def liquid_coins(assets, min_ntl=LIQUID_MIN_DAY_NTL):
@@ -928,7 +949,10 @@ def load_runner():
         return {"last_weekly_sent": None}
     if not isinstance(data, dict):
         return {"last_weekly_sent": None}
-    return {"last_weekly_sent": data.get("last_weekly_sent")}
+    sent = data.get("last_weekly_sent")
+    if not isinstance(sent, str) or not sent:
+        sent = None
+    return {"last_weekly_sent": sent}
 
 
 def save_runner(state):

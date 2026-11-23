@@ -5,6 +5,9 @@ Public info API only. No exchange keys and no orders. One run appends the
 market snapshot every hour. The 4h books act when a new 4h candle has
 closed. The 1h book acts on each new closed hour, and stays quiet
 (warming_up) until the snapshot log covers 7 days.
+
+The weekly summary goes out once per ISO week, on the first run at or
+after Monday 08:00 UTC. The week is stored only after a 2xx POST.
 """
 import os
 import sys
@@ -253,6 +256,31 @@ def _weekly_payload(now_ms):
     }
 
 
+def send_weekly(now, now_ms, lines):
+    """POST trend4h_weekly once per ISO week. Never raises into the books.
+
+    `posted` is the 2xx result from the webhook. A dry-run, a failed POST,
+    or any exception leaves runner.json unchanged so the next run retries.
+    """
+    try:
+        runner = paper.load_runner()
+        if not paper.weekly_due(now, runner.get("last_weekly_sent")):
+            return False
+        payload = _weekly_payload(now_ms)
+        status = paper.post_webhook([payload])
+        paper.log(f"trend4h_weekly status={status}")
+        lines.append(f"- Resumen semanal: `{status}`.")
+        if status != "posted":
+            return False
+        runner["last_weekly_sent"] = paper.iso_week_id(now)
+        paper.save_runner(runner)
+        return True
+    except Exception as exc:
+        paper.log(f"trend4h_weekly: fallo, los libros no se tocan: {exc}")
+        lines.append("- Resumen semanal: fallo, los libros no se han tocado.")
+        return False
+
+
 def guard_book(name, fn):
     """Run one book. A failure is logged and does not reach the other books."""
     try:
@@ -402,16 +430,6 @@ def run(now=None):
     changed = changed or mutated
     lines.append(f"- {line}")
 
-    runner = paper.load_runner()
-    if paper.weekly_due(now, runner.get("last_weekly_sent")):
-        payload = _weekly_payload(now_ms)
-        status = paper.post_webhook([payload])
-        paper.log(f"trend4h_weekly status={status}")
-        lines.append(f"- Resumen semanal: `{status}`.")
-        if status != "post_failed":
-            runner["last_weekly_sent"] = now.date().isoformat()
-            paper.save_runner(runner)
-            changed = True
     if events:
         status = paper.post_webhook(events)
         paper.log(f"paper webhook status={status} eventos={len(events)}")
@@ -420,8 +438,11 @@ def run(now=None):
         lines.append("- Sin entradas ni salidas en esta pasada.")
     research_wrote, research_notes = _collect_research(assets, snap, now)
     lines.extend(research_notes)
+    # After the books. A failure here is swallowed, and a 2xx is recorded
+    # before mark_ready so detector-state keeps the ISO week.
+    weekly_sent = send_weekly(now, now_ms, lines)
+    changed = changed or weekly_sent or research_wrote
     paper.write_summary(lines)
-    changed = changed or research_wrote
     if changed:
         bits = []
         if appended:
@@ -429,6 +450,8 @@ def run(now=None):
         bits.append(f"eventos={len(events)}")
         if research_wrote:
             bits.append("research=1")
+        if weekly_sent:
+            bits.append("weekly=1")
         paper.mark_ready("paper " + " ".join(bits))
     else:
         paper.log("paper: sin cambios. La rama detector-state no se toca.")

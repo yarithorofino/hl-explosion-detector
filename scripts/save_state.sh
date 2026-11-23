@@ -312,7 +312,7 @@ No edites estos ficheros: el siguiente ciclo los sustituye.
 - data/c1_maker/open.json y data/c1_maker/trades.csv
   Libro de paper del pump-fade corto con límite maker (c1_maker). No hay órdenes reales.
 - data/paper/runner.json
-  Fecha del último resumen semanal.
+  Semana ISO del último resumen semanal enviado (last_weekly_sent, p. ej. 2026-W47). Solo se escribe tras un POST 2xx.
 - data/market_log/AAAA-MM-DD.csv
   Snapshot horario de perps. Se conservan 120 días.
 - data/orderbook_log/AAAA-MM-DD.csv

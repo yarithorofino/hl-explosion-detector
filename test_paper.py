@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 """Paper strategies. No network and no webhook."""
 import csv
+import io
+import json
+import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 import setup_scanner
 import paper
+import paper_run
 import squeeze4h
 import trapped_shorts1h
 import trend4h
@@ -438,13 +444,6 @@ class BookkeepingTests(unittest.TestCase):
         self.assertEqual(forming["t"], 5 * paper.FOUR_H_MS)
         self.assertEqual(paper.latest_closed_open(now, paper.FOUR_H_MS), 4 * paper.FOUR_H_MS)
 
-    def test_weekly_window_is_monday_at_08_utc_once(self):
-        monday = datetime(2026, 11, 16, 8, 2, tzinfo=timezone.utc)
-        self.assertTrue(paper.weekly_due(monday, None))
-        self.assertFalse(paper.weekly_due(monday, "2026-11-16"))
-        self.assertFalse(paper.weekly_due(monday.replace(hour=9), None))
-        self.assertFalse(paper.weekly_due(monday - timedelta(days=1), None))
-
     def test_market_log_dedupes_the_hour_and_oi_lookup(self):
         now = datetime(2026, 11, 16, 14, 2, tzinfo=timezone.utc)
         old = now - timedelta(hours=168)
@@ -467,6 +466,202 @@ class BookkeepingTests(unittest.TestCase):
             target = int(now.timestamp() * 1000) - 168 * paper.HOUR_MS
             # old was 14:02 floored to 14:00, target is 14:00 seven days earlier.
             self.assertEqual(paper.oi_near(directory, "BTC", target), 5.0)
+
+
+class WeeklySummaryTests(unittest.TestCase):
+    """trend4h_weekly once per ISO week, after Monday 08:00 UTC."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        patcher = mock.patch.object(paper, "ROOT", self.root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _ms(self, now):
+        return int(now.timestamp() * 1000)
+
+    def _saved_week(self):
+        path = self.root / "data" / "paper" / "runner.json"
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data.get("last_weekly_sent")
+
+    def _assert_payload(self, payload):
+        self.assertEqual(len(payload), 1)
+        body = payload[0]
+        self.assertEqual(body["type"], "trend4h_weekly")
+        self.assertIs(body["paper"], True)
+        self.assertEqual(set(body["books"]), set(paper.BOOKS))
+        trend = body["books"]["trend4h"]
+        self.assertEqual(body["open_positions"], trend["open_positions"])
+        self.assertEqual(body["closed_trades"], trend["closed_trades"])
+        self.assertEqual(body["cumulative_r"], trend["cumulative_r"])
+        self.assertEqual(body["win_rate"], trend["win_rate"])
+        for name in paper.BOOKS:
+            book = body["books"][name]
+            for key in (
+                "open_positions", "open_count", "closed_trades", "skipped_cap",
+                "cumulative_r", "win_rate", "week_closed_trades",
+                "week_cumulative_r", "week_win_rate",
+            ):
+                self.assertIn(key, book)
+
+    def test_on_time_run_posts_once_and_records_the_iso_week(self):
+        early = datetime(2026, 11, 16, 7, 59, tzinfo=timezone.utc)
+        on_time = datetime(2026, 11, 16, 8, 2, tzinfo=timezone.utc)
+        self.assertFalse(paper.weekly_due(early, None))
+        self.assertTrue(paper.weekly_due(datetime(2026, 11, 16, 8, 0, tzinfo=timezone.utc), None))
+        posts = []
+
+        def fake(payload):
+            posts.append(payload)
+            return "posted"
+
+        lines = []
+        with mock.patch.object(paper, "post_webhook", fake):
+            self.assertFalse(paper_run.send_weekly(early, self._ms(early), lines))
+            self.assertTrue(paper_run.send_weekly(on_time, self._ms(on_time), lines))
+            self.assertFalse(paper_run.send_weekly(on_time, self._ms(on_time), lines))
+        self.assertEqual(len(posts), 1)
+        self._assert_payload(posts[0])
+        self.assertEqual(self._saved_week(), "2026-W47")
+        self.assertEqual(lines, ["- Resumen semanal: `posted`."])
+
+    def test_drifted_runs_skip_0729_and_send_at_0921(self):
+        # 23 Nov 2026: the hourly cron landed at 07:29 and 09:21 UTC, never in 08:xx.
+        early = datetime(2026, 11, 23, 7, 29, tzinfo=timezone.utc)
+        late = datetime(2026, 11, 23, 9, 21, tzinfo=timezone.utc)
+        madrid = timezone(timedelta(hours=1))
+        self.assertFalse(paper.weekly_due(early, None))
+        self.assertTrue(paper.weekly_due(late, None))
+        self.assertFalse(paper.weekly_due(datetime(2026, 11, 23, 8, 30, tzinfo=madrid), None))
+        self.assertTrue(paper.weekly_due(datetime(2026, 11, 23, 9, 21), None))
+        posts = []
+
+        def fake(payload):
+            posts.append(payload)
+            return "posted"
+
+        with mock.patch.object(paper, "post_webhook", fake):
+            self.assertFalse(paper_run.send_weekly(early, self._ms(early), []))
+            self.assertTrue(paper_run.send_weekly(late, self._ms(late), []))
+        self.assertEqual(len(posts), 1)
+        self._assert_payload(posts[0])
+        self.assertEqual(self._saved_week(), "2026-W48")
+
+    def test_missed_monday_catches_up_on_tuesday(self):
+        # 17 Nov 2026 was the Tuesday after a Monday the old hour==8 gate missed.
+        tuesday = datetime(2026, 11, 17, 7, 29, tzinfo=timezone.utc)
+        later = datetime(2026, 11, 17, 18, 4, tzinfo=timezone.utc)
+        self.assertEqual(paper.iso_week_id(tuesday), "2026-W47")
+        self.assertTrue(paper.weekly_due(tuesday, None))
+        posts = []
+
+        def fake(payload):
+            posts.append(payload)
+            return "posted"
+
+        with mock.patch.object(paper, "post_webhook", fake):
+            self.assertTrue(paper_run.send_weekly(tuesday, self._ms(tuesday), []))
+            self.assertFalse(paper_run.send_weekly(later, self._ms(later), []))
+        self.assertEqual(len(posts), 1)
+        self._assert_payload(posts[0])
+        self.assertEqual(self._saved_week(), "2026-W47")
+
+    def test_failed_post_is_retried_until_a_2xx(self):
+        first = datetime(2026, 11, 23, 9, 21, tzinfo=timezone.utc)
+        second = datetime(2026, 11, 23, 10, 4, tzinfo=timezone.utc)
+        third = datetime(2026, 11, 23, 11, 2, tzinfo=timezone.utc)
+        fourth = datetime(2026, 11, 23, 12, 2, tzinfo=timezone.utc)
+        replies = ["dry_run", "post_failed", "posted"]
+
+        def fake(payload):
+            self._assert_payload(payload)
+            return replies.pop(0)
+
+        with mock.patch.object(paper, "post_webhook", fake):
+            self.assertFalse(paper_run.send_weekly(first, self._ms(first), []))
+            self.assertIsNone(self._saved_week())
+            self.assertTrue(paper.weekly_due(second, paper.load_runner().get("last_weekly_sent")))
+            self.assertFalse(paper_run.send_weekly(second, self._ms(second), []))
+            self.assertIsNone(self._saved_week())
+            self.assertTrue(paper_run.send_weekly(third, self._ms(third), []))
+            self.assertFalse(paper_run.send_weekly(fourth, self._ms(fourth), []))
+        self.assertEqual(replies, [])
+        self.assertEqual(self._saved_week(), "2026-W48")
+
+    def test_no_duplicate_within_the_same_iso_week(self):
+        slots = [
+            datetime(2026, 11, 16, 8, 2, tzinfo=timezone.utc),
+            datetime(2026, 11, 17, 9, 21, tzinfo=timezone.utc),
+            datetime(2026, 11, 22, 23, 40, tzinfo=timezone.utc),
+            datetime(2026, 11, 23, 7, 29, tzinfo=timezone.utc),
+            datetime(2026, 11, 23, 9, 21, tzinfo=timezone.utc),
+        ]
+        posts = []
+
+        def fake(payload):
+            posts.append(payload[0]["type"])
+            return "posted"
+
+        with mock.patch.object(paper, "post_webhook", fake):
+            sent = [paper_run.send_weekly(now, self._ms(now), []) for now in slots]
+        self.assertEqual(sent, [True, False, False, False, True])
+        self.assertEqual(posts, ["trend4h_weekly", "trend4h_weekly"])
+        self.assertEqual(self._saved_week(), "2026-W48")
+        year_end = datetime(2026, 12, 28, 8, 0, tzinfo=timezone.utc)
+        new_year = datetime(2027, 1, 4, 8, 0, tzinfo=timezone.utc)
+        self.assertEqual(paper.iso_week_id(year_end), "2026-W53")
+        self.assertEqual(paper.iso_week_id(datetime(2027, 1, 3, 12, 0, tzinfo=timezone.utc)), "2026-W53")
+        self.assertEqual(paper.iso_week_id(new_year), "2027-W01")
+        self.assertFalse(paper.weekly_due(datetime(2027, 1, 3, 12, 0, tzinfo=timezone.utc), "2026-W53"))
+        self.assertFalse(paper.weekly_due(datetime(2027, 1, 4, 7, 59, tzinfo=timezone.utc), "2026-W53"))
+        self.assertTrue(paper.weekly_due(new_year, "2026-W53"))
+
+    def test_weekly_failure_does_not_touch_books_or_print_secrets(self):
+        secret = "https://hooks.example.test/weekly-token-value"
+        bodies = {}
+        for name in paper.BOOKS:
+            path = self.root / "data" / name / "open.json"
+            path.parent.mkdir(parents=True)
+            text = '{"strategy":"%s","positions":[{"coin":"BTC"}]}\n' % name
+            path.write_text(text, encoding="utf-8")
+            bodies[name] = path.read_bytes()
+        paper.save_runner({"last_weekly_sent": "2026-W46"})
+        runner_path = self.root / "data" / "paper" / "runner.json"
+        runner_before = runner_path.read_bytes()
+        previous = os.environ.get("EXPLOSION_WEBHOOK_URL")
+        os.environ["EXPLOSION_WEBHOOK_URL"] = secret
+
+        def restore_env():
+            if previous is None:
+                os.environ.pop("EXPLOSION_WEBHOOK_URL", None)
+            else:
+                os.environ["EXPLOSION_WEBHOOK_URL"] = previous
+
+        self.addCleanup(restore_env)
+        now = datetime(2026, 11, 23, 9, 21, tzinfo=timezone.utc)
+
+        def boom(payload):
+            raise RuntimeError(f"POST {secret} failed")
+
+        lines = []
+        stdout = io.StringIO()
+        with mock.patch.object(paper, "post_webhook", boom), redirect_stdout(stdout):
+            sent = paper_run.send_weekly(now, self._ms(now), lines)
+        self.assertFalse(sent)
+        self.assertEqual(lines, ["- Resumen semanal: fallo, los libros no se han tocado."])
+        leaked = secret in stdout.getvalue() or secret in "\n".join(lines)
+        self.assertFalse(leaked, "el registro del resumen semanal contiene un secreto")
+        self.assertIn("[redacted]", stdout.getvalue())
+        for name in paper.BOOKS:
+            path = self.root / "data" / name / "open.json"
+            self.assertEqual(path.read_bytes(), bodies[name])
+        self.assertEqual(runner_path.read_bytes(), runner_before)
+        self.assertEqual(self._saved_week(), "2026-W46")
 
 
 if __name__ == "__main__":
