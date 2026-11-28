@@ -1,0 +1,39 @@
+Esta rama la reescriben GitHub Actions (workflows "Detector de explosiones" y "Paper 4h").
+No edites estos ficheros: el siguiente ciclo los sustituye.
+
+- data/detector_state.json
+  Memoria del detector: precios e interés abierto de hace unas horas, pausa por activo y contadores de avisos (día y hora).
+- signals/explosion_alerts.jsonl
+  Historial corto de avisos (una línea JSON por tanda). Si aún no ha habido avisos, este fichero no está.
+- data/scans/latest.md
+  Tabla del último ciclo, la misma que el resumen de Actions.
+- data/scans/AAAA-MM-DD.csv
+  Un candidato por fila. Solo se conservan los últimos 14 días.
+- data/shadow/AAAA-MM-DD.csv
+  Señales tempranas antiguas, si quedara alguna. Ya no se escriben.
+- data/confluence/AAAA-MM-DD.csv
+  Avisos confluence_1h (enviados, en silencio, sin delta, tope). Recuento hasta el 24 nov.
+- data/trend4h/open.json y data/trend4h/trades.csv
+  Libro de paper de la tendencia 4h (posiciones abiertas y cierres).
+- data/squeeze4h/open.json y data/squeeze4h/trades.csv
+  Libro de paper del squeeze 4h.
+- data/trapped_shorts1h/open.json y data/trapped_shorts1h/trades.csv
+  Libro de paper de trapped shorts 1h.
+- data/c1_maker/open.json y data/c1_maker/trades.csv
+  Libro de paper del pump-fade corto con límite maker (c1_maker). No hay órdenes reales.
+- data/paper/runner.json
+  Semana ISO del último resumen semanal enviado (last_weekly_sent, p. ej. 2026-W47). Solo se escribe tras un POST 2xx.
+- data/market_log/AAAA-MM-DD.csv
+  Snapshot horario de perps. Se conservan 120 días.
+- data/orderbook_log/AAAA-MM-DD.csv
+  Profundidad del libro (0,5%, 1% y 2%) y spread. Se conservan 120 días.
+- data/listings_log.csv y data/listings_snapshot.json
+  Altas, bajas y cambios de apalancamiento máximo, y la última foto del universo.
+- data/liq_proxy_log/AAAA-MM-DD.csv
+  Proxy horario de OI, rango y volumen. No es una liquidación. Se conservan 120 días.
+- data/liq_trades_log/AAAA-MM-DD.csv
+  Trades públicos que traen marca de liquidación, si el payload la trae.
+- data/liq_tape_log/AAAA-MM-DD.csv
+  Muestra de la cinta pública: duración, trades vistos y cuántos venían marcados.
+
+No hay secretos aquí. La URL del webhook no se guarda en el repositorio.

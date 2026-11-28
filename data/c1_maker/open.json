@@ -1,0 +1,22 @@
+{
+ "equity_usdc": 1000.0,
+ "fee_maker": 0.00015,
+ "fee_per_side": 0.00015,
+ "fee_taker": 0.00045,
+ "last_processed_open_ms": 1795888800000,
+ "last_run": "2026-11-28T19:52:17Z",
+ "last_signal_t": {
+  "BIGTIME": 1795647600000,
+  "INIT": 1795755600000
+ },
+ "pending_entries": [],
+ "pending_exits": [],
+ "positions": [],
+ "risk_pct": 0.0025,
+ "shadows": [],
+ "signals": [],
+ "slippage": 0.0001,
+ "strategy": "c1_maker",
+ "variant": "A",
+ "version": 1
+}

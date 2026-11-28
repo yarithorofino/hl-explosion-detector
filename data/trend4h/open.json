@@ -1,0 +1,29 @@
+{
+ "equity_usdc": 10000.0,
+ "fee_per_side": 0.0007,
+ "last_processed_open_ms": 1795867200000,
+ "last_run": "2026-11-28T16:46:52Z",
+ "pending_entries": [],
+ "pending_exits": [],
+ "positions": [
+  {
+   "atr": 0.0001462855889068692,
+   "coin": "kPEPE",
+   "ema100": 0.0045174397310116035,
+   "ema200": 0.004518924521638078,
+   "entry": 0.003902,
+   "entry_t": 1794902400000,
+   "highest_high": null,
+   "initial_stop": 0.004340856766720608,
+   "mark_entry": 0.003858,
+   "risk_usd": 25.0,
+   "side": "short",
+   "signal_t": 1794888000000,
+   "size": 56966.194658030465,
+   "stop": 0.004340856766720608
+  }
+ ],
+ "risk_pct": 0.0025,
+ "strategy": "trend4h",
+ "version": 1
+}
